@@ -1,0 +1,36 @@
+.title {
+  font-family: "Alleyn W01 Regular", monospace;
+  font-weight: 700px;
+  color: #3a6bb7;
+  height: 30px;
+}
+
+.pokemon-name, .pokemon-type {
+  text-transform: capitalize;
+}
+
+.title {
+  font-weight: bold;
+  white-space: nowrap;
+}
+
+.info-value {
+  word-wrap: break-word;
+}
+
+/* Smooth fade-in for tab content */
+.chakra-tabs__tab-panel {
+  animation: fadeIn 0.5s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

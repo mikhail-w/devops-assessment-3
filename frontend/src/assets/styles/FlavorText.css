@@ -1,0 +1,77 @@
+.paginationBttns {
+  width: 400px;
+  height: 120px;
+  padding: 20px;
+  list-style: none;
+  display: flex;
+  justify-content: space-around;
+  align-items: center;
+  margin-top: -30px;
+  /* outline: 1px solid red; */
+}
+
+.pagination {
+  list-style: none;
+  height: 31.5px;
+  width: 31.5px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 2px;
+  cursor: pointer;
+}
+
+.hiddenPage {
+  display: none;
+}
+
+.hiddenLink {
+  display: none;
+}
+
+.previousBttn, .nextBttn {
+  background-color: initial;
+  background-image: linear-gradient(-180deg, #00D775, #00BD68);
+  border-radius: 5px;
+  box-shadow: rgba(0, 0, 0, 0.1) 0 2px 4px;
+  /* color: #FFFFFF; */
+  cursor: pointer;
+  display: inline-block;
+  /* font-family: Inter, -apple-system, system-ui, Roboto, "Helvetica Neue", Arial, sans-serif; */
+  font-family: 'Alleyn W01 Regular';
+  letter-spacing: 2px;
+  height: 44px;
+  line-height: 44px;
+  outline: 0;
+  overflow: hidden;
+  padding: 0 20px;
+  pointer-events: auto;
+  position: relative;
+  text-align: center;
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+  vertical-align: top;
+  white-space: nowrap;
+  width: 100%;
+  /* z-index: 9; */
+  border: 0;
+}
+
+.previousBttn:hover {
+  background: #00bd68;
+}
+
+.nextBttn:hover {
+  background: #00bd68;
+}
+
+.paginationActive {
+  color: white;
+  background-color: #00bd68;
+  padding: 5px;
+  /* Teal color */
+  border-color: #00bd68;
+  border-radius: 150px;
+  font-weight: bold;
+}

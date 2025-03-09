@@ -1,0 +1,77 @@
+.card {
+  position: relative;
+  width: 15vw;
+  /* Scales based on viewport width */
+  max-width: 120px;
+  /* Caps the card size */
+  aspect-ratio: 1 / 1;
+  /* Ensures the card remains square */
+  margin: 10px;
+}
+
+.card img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border-radius: 50%;
+  /* Makes the image circular */
+  object-fit: cover;
+  /* Ensures the image fits inside the card */
+}
+
+.card .front,
+.card .back {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  backface-visibility: hidden;
+}
+
+.card .front {
+  transform: rotateY(90deg);
+  transition: all ease-in 0.2s;
+}
+
+.flipped .front {
+  transform: rotateY(0deg);
+  transition-delay: 0.2s;
+}
+
+.card .back {
+  transition: all ease-in 0.2s;
+  transition-delay: 0.2s;
+}
+
+.flipped .back {
+  transform: rotateY(90deg);
+  transition-delay: 0s;
+}
+
+.back:hover {
+  cursor: pointer;
+  /* border: 80px solid #ffffff; */
+  /* box-shadow: 0px 0px 4px #ffffff; */
+  animation: shaking 0.5s .1s;
+}
+
+@keyframes shaking {
+  0% {
+    transform: rotate(0deg);
+  }
+
+  20% {
+    transform: rotate(-4deg);
+  }
+
+  50% {
+    transform: rotate(0deg);
+  }
+
+  70% {
+    transform: rotate(4deg);
+  }
+
+  100% {
+    transform: rotate(0deg);
+  }
+}

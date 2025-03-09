@@ -1,0 +1,86 @@
+/* Pokemon Image Positions and Animations */
+.ballOutline2 {
+  position: fixed;
+  bottom: 50px;
+  right: -600px;
+  opacity: 0.1;
+  transform: rotate(-0.1turn);
+  z-index: -1;
+  animation: rotation 20s infinite linear;
+}
+
+.ballOutline2.landscape {
+  right: -500px;
+}
+
+.ballOutline3 {
+  position: fixed;
+  top: 0;
+  left: 50px;
+  opacity: 0.3;
+  transform: rotate(-0.1turn);
+  z-index: -1;
+  animation: rotation 20s infinite linear;
+}
+
+.logo {
+  height: 100px;
+  margin: 10px auto;
+  text-align: center;
+}
+
+.logo img {
+  transform: scale(0.7);
+}
+
+/* Pokemon Character Positions */
+.bulbasaur {
+  height: 300px;
+  position: fixed;
+  top: 400px;
+  left: -65px;
+}
+
+.pikachu {
+  height: 200px;
+  position: fixed;
+  top: 170px;
+  left: -25px;
+}
+
+.charizard {
+  height: 300px;
+  position: fixed;
+  top: 200px;
+  right: -65px;
+  transform: rotate(-0.1turn);
+}
+
+.charizard.landscape {
+  top: 70px;
+}
+
+.pokeball3 {
+  height: 200px;
+  position: fixed;
+  top: 550px;
+  right: -65px;
+}
+
+.pokeball3 img,
+.bulbasaur img,
+.pikachu img,
+.charizard img {
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes rotation {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(359deg);
+  }
+}

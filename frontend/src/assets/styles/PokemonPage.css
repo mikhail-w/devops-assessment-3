@@ -1,0 +1,10 @@
+.not-found {
+  margin-top: 100px;
+  font-family: "Lato", sans-serif;
+}
+
+.not-found span {
+  margin: 0 5px;
+  font-weight: 800;
+  color: red;
+}

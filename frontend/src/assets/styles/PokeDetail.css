@@ -1,0 +1,398 @@
+/* Base Styles */
+:root {
+  --primary-text-color: #343a40;
+  --font-family-alleyn: 'Alleyn W01 Regular';
+  --font-family-lato: 'Lato', sans-serif;
+  --transition-quick: 100ms;
+  --transition-normal: 200ms;
+  --transition-slow: 500ms;
+  --transition-very-slow: 1500ms;
+  --border-radius-large: 50px;
+  --border-radius-medium: 20px;
+  --border-radius-small: 10px;
+  --stat-bar-height: 4px;
+}
+
+/* Modal Layout */
+.modal-content {
+  display: flex;
+  flex-direction: row;
+  height: 90vh;
+  max-height: 90vh;
+  transition: all 0.5s ease-in-out;
+}
+
+.modal-content.extended-row {
+  max-width: 1050px;
+}
+
+.modal-content.extended-column {
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.mobile-extended {
+  padding: 20px;
+  margin-top: 50px;
+}
+
+/* Typography */
+.modal-title,
+.evoTitle,
+.pname {
+  font-family: var(--font-family-alleyn);
+}
+
+.evoTitle {
+  margin: 170px 0 30px;
+  font-size: 1.3rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  text-decoration: underline;
+}
+
+.pname {
+  text-transform: capitalize;
+}
+
+/* Background Elements */
+.background-watermark {
+  transform: translate(-50%, -50%);
+  font-size: 100px;
+  font-weight: bold;
+  color: rgba(255, 255, 255, 0.2);
+  text-shadow: 1px 1px 2px rgba(0, 0, 0, 0.5);
+  z-index: 0;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Extended section animations */
+.extended-section {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  margin-top: 50px;
+  height: 100%;
+  justify-content: center;
+  align-items: center;
+  background: url(../images/pokeballs/ballopacity.png) no-repeat;
+  background-size: cover;
+  background-position: right -230px bottom -250px;
+  opacity: 1;
+  visibility: visible;
+  transition: opacity 0.5s ease-in-out;
+  overflow: hidden;
+}
+
+/* Handle visibility of extended content */
+.extended-content {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 1.3s ease-in-out;
+  width: 100%;
+  height: 100%;
+}
+
+.extended-content.visible {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Navigation Elements */
+.modal-return {
+  transition-duration: var(--transition-quick);
+}
+
+.modal-return:hover {
+  cursor: pointer;
+  transform: translateX(-5px);
+  transition-duration: var(--transition-normal);
+}
+
+/* Extend Modal Button */
+.extend-modal {
+  position: absolute;
+  right: 10px;
+  top: 40%;
+  transition-duration: var(--transition-quick);
+  color: white;
+  transform: rotate(0deg);
+  transition: transform var(--transition-slow) linear;
+  opacity: 0.2;
+}
+
+.extend-modal:hover {
+  cursor: pointer;
+  transition-duration: var(--transition-normal);
+  filter: brightness(120%) saturate(240%);
+  opacity: 1;
+}
+
+.notExtended:hover {
+  color: #8de7a9;
+}
+
+.isExtended {
+  color: #ac4f51;
+  transform: rotate(180deg);
+  transition: transform 1s linear;
+}
+
+/* Type Tabs */
+.pokeDetail-type-tab {
+  align-items: center;
+  padding: 7px 15px;
+  color: #fff;
+  border-radius: var(--border-radius-medium);
+  margin: 10px 8px;
+  text-transform: capitalize;
+  line-height: 100%;
+  font-size: 0.92rem;
+  box-shadow: 4px 6px 15px rgba(0, 0, 0, 0.7);
+}
+
+/* Info Container */
+.pokeDetail-info-container {
+  width: 100%;
+  position: absolute;
+  left: 0;
+  color: var(--primary-text-color);
+  background-color: #fff;
+  min-height: 280px;
+  padding: 20px 30px;
+  border-top-left-radius: var(--border-radius-large);
+  border-top-right-radius: var(--border-radius-large);
+  margin-bottom: 0;
+}
+
+.flavorBoxContainer {
+  height: 280px;
+  justify-content: center;
+  overflow: hidden;
+}
+
+/* Stats and Descriptions */
+.subtitle,
+.stat-name {
+  color: var(--primary-text-color);
+  opacity: 0.65;
+  font-weight: 700;
+  width: 155px;
+  font-size: 0.95rem;
+}
+
+.description,
+.stat-value {
+  color: var(--primary-text-color);
+  font-family: var(--font-family-lato);
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.description {
+  text-transform: capitalize;
+  margin-left: 10px;
+}
+
+.stat-name {
+  width: 150px;
+  text-transform: uppercase;
+  text-align: left;
+}
+
+.stat-value {
+  font-weight: 700;
+}
+
+/* Stat Bars */
+.stat-bar-container {
+  width: 100%;
+  height: var(--stat-bar-height);
+  margin-right: 10px;
+  border-radius: var(--border-radius-small);
+  position: relative;
+  overflow: visible;
+}
+
+.stat-bar-parent {
+  height: 100%;
+  width: 50%;
+  position: relative;
+  transform: scaleX(0.001);
+  transform-origin: left;
+  animation: scaleBar var(--transition-very-slow) ease-in-out 1 forwards;
+}
+
+.stat-bar-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: var(--border-radius-small);
+  position: relative;
+  left: -1%;
+  transform: scaleX(0.01);
+  transform-origin: top left;
+  animation: fillBG var(--transition-slow) ease-out 1 forwards;
+}
+
+.stat-bar-bg {
+  top: 0;
+  left: 0;
+  position: absolute;
+  width: 98%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: var(--border-radius-small);
+}
+
+/* Smooth Transition for Tabs */
+.chakra-tabs__tab {
+  transition: all 0.3s ease-in-out;
+}
+
+.chakra-tabs__tab[aria-selected="true"] {
+  transform: scale(1.1);
+  font-weight: bold;
+  color: #ffcc00;
+  /* Adjust based on type */
+}
+
+/* Animations */
+@keyframes scaleBar {
+  from {
+    transform: scaleX(0.001);
+  }
+
+  to {
+    transform: scaleX(1);
+  }
+}
+
+@keyframes fillBG {
+  from {
+    transform: scaleX(0.01);
+  }
+
+  to {
+    transform: scaleX(1);
+  }
+}
+
+/* Type-specific Stat Bar Gradients */
+.stat-bar-fill {
+  --gradient-opacity: 0.75;
+}
+
+.stat-bar-fill.grass {
+  background: linear-gradient(to right,
+      rgba(41, 255, 198, var(--gradient-opacity)),
+      rgba(32, 227, 178, var(--gradient-opacity)),
+      rgba(12, 235, 235, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.fire {
+  background: linear-gradient(to right,
+      rgba(245, 175, 25, var(--gradient-opacity)),
+      rgba(241, 39, 17, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.water {
+  background: linear-gradient(to right,
+      rgba(47, 128, 237, var(--gradient-opacity)),
+      rgba(86, 204, 242, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.electric {
+  background: linear-gradient(90deg,
+      rgba(250, 224, 120, var(--gradient-opacity)),
+      rgba(248, 208, 48, var(--gradient-opacity)),
+      rgba(247, 174, 18, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.bug {
+  background: linear-gradient(to right,
+      rgba(141, 194, 111, var(--gradient-opacity)),
+      rgba(118, 184, 82, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.dragon {
+  background-image: linear-gradient(315deg,
+      rgba(31, 209, 249, 0.65) 0%,
+      rgba(182, 33, 254, 0.65) 74%);
+}
+
+.stat-bar-fill.fairy {
+  background: linear-gradient(to right,
+      rgba(255, 221, 225, var(--gradient-opacity)),
+      rgba(238, 156, 167, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.ghost {
+  background: linear-gradient(to right,
+      rgba(51, 51, 153, var(--gradient-opacity)),
+      rgba(255, 0, 204, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.ground {
+  background: linear-gradient(to right,
+      rgba(255, 212, 82, var(--gradient-opacity)),
+      rgba(84, 74, 125, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.ice {
+  background: linear-gradient(to right,
+      rgba(255, 255, 255, var(--gradient-opacity)),
+      rgba(109, 213, 250, var(--gradient-opacity)),
+      rgba(41, 128, 185, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.normal {
+  background: linear-gradient(to right,
+      rgba(222, 203, 164, 0.65),
+      rgba(62, 81, 81, 0.65));
+}
+
+.stat-bar-fill.poison {
+  background: linear-gradient(to right,
+      rgba(253, 239, 249, var(--gradient-opacity)),
+      rgba(236, 56, 188, var(--gradient-opacity)),
+      rgba(115, 3, 192, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.psychic {
+  background: linear-gradient(to right,
+      rgba(75, 192, 200, 0.6),
+      rgba(199, 121, 208, 0.6));
+}
+
+.stat-bar-fill.rock {
+  background: linear-gradient(to right,
+      rgba(209, 194, 125, 0.7),
+      rgba(184, 160, 56, 0.7),
+      rgba(120, 104, 36, 0.7));
+}
+
+.stat-bar-fill.steel {
+  background: linear-gradient(90deg,
+      rgba(209, 209, 224, var(--gradient-opacity)),
+      rgba(184, 184, 208, var(--gradient-opacity)),
+      rgba(120, 120, 135, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.fighting {
+  background: linear-gradient(to right,
+      rgba(227, 93, 91, var(--gradient-opacity)),
+      rgba(229, 57, 53, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.flying {
+  background: linear-gradient(to right,
+      rgba(142, 84, 233, var(--gradient-opacity)),
+      rgba(71, 118, 230, var(--gradient-opacity)));
+}
+
+.stat-bar-fill.dark {
+  background: linear-gradient(to right,
+      rgba(161, 127, 224, 0.65),
+      rgba(89, 193, 115, 0.65));
+}

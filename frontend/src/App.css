@@ -1,0 +1,14 @@
+@font-face {
+  font-family: 'Alleyn W01 Regular';
+  src: url('../src/fonts/font.ttf') format('tff'),
+    url('../src/fonts/font.woff') format('woff'),
+    url('../src/fonts/font.woff2') format('woff2');
+}
+
+body, .text {
+  font-family: 'Alleyn W01 Regular';
+}
+
+.text {
+  font-family: 'Alleyn W01 Regular';
+}

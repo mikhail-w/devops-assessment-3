@@ -1,0 +1,104 @@
+.logo {
+  max-width: 300px;
+  /* max-height: 100px; */
+}
+
+#spinner:hover {
+  cursor: pointer;
+  text-align: center;
+  animation-name: spin, depth;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: 3s;
+}
+
+@keyframes spin {
+  from {
+    transform: rotateY(0deg);
+  }
+
+  to {
+    transform: rotateY(-360deg);
+  }
+}
+
+@keyframes depth {
+  0% {
+    text-shadow: 0 0 black;
+  }
+
+  25% {
+    text-shadow: 1px 0 black, 2px 0 black, 3px 0 black, 4px 0 black, 5px 0 black;
+  }
+
+  50% {
+    text-shadow: 0 0 black;
+  }
+
+  75% {
+    text-shadow: -1px 0 black, -2px 0 black, -3px 0 black, -4px 0 black, -5px 0 black;
+  }
+
+  100% {
+    text-shadow: 0 0 black;
+  }
+}
+
+.newgame {
+  background: none;
+  padding: 4px 8px;
+  border-radius: 3px;
+  color: #fff;
+  font-weight: bold;
+  cursor: pointer;
+  font-size: 0.85em;
+}
+
+.newgame:hover {
+  animation: shaking 0.5s infinite;
+}
+
+@keyframes shaking {
+  0% {
+    transform: rotate(0deg);
+  }
+
+  20% {
+    transform: rotate(-4deg);
+  }
+
+  50% {
+    transform: rotate(0deg);
+  }
+
+  70% {
+    transform: rotate(4deg);
+  }
+
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+.card-grid {
+  /* margin-top: 40px; */
+  margin-bottom: 30px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  grid-gap: 20px;
+  max-width: fit-content;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.background {
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: center;
+  overflow: hidden;
+}
