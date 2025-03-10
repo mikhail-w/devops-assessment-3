@@ -15,7 +15,7 @@ import ProfilePage from './pages/ProfilePage.jsx';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <ChakraProvider>
-    <BrowserRouter basename="/pokedex">
+    <BrowserRouter basename="/">
       <Routes>
         <Route path="/" element={<App />}>
           <Route index element={<HomePage />} />

@@ -59,7 +59,8 @@ const router = createBrowserRouter(
     },
   ],
   {
-    basename: '/pokedex',
+    // Use relative path for basename to work in Docker
+    basename: '/',
   }
 );
 

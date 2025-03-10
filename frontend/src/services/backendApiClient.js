@@ -1,4 +1,9 @@
-const BACKEND_API_BASE_URL = 'http://localhost:8000/api';
+// Use environment variable or fallback to localhost:3000
+const BACKEND_API_BASE_URL = import.meta.env?.VITE_API_BASE_URL
+  ? `${import.meta.env.VITE_API_BASE_URL}/api`
+  : 'http://localhost:3000/api';
+
+console.log('Using backend API URL:', BACKEND_API_BASE_URL);
 
 const backendApiClient = {
   // Handle API responses and error cases
