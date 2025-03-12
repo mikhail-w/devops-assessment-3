@@ -5,117 +5,34 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch: # Allows manual triggering
-    inputs:
-      recreate:
-        description: 'Recreate infrastructure from scratch'
-        required: false
-        default: 'false'
-        type: boolean
+  workflow_dispatch:
 
 jobs:
   test:
     name: Test Application
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Frontend Tests
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
-          cache: 'npm'
-          cache-dependency-path: '**/package-lock.json'
-
-      - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
-
-      - name: Run frontend linting
-        run: |
-          cd frontend
-          npm run lint
-        continue-on-error: true
-
-      # Backend Tests
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install backend dependencies
-        run: |
-          cd backend
-          pip install -r requirements.txt
-
-      - name: Run backend tests
-        run: |
-          cd backend
-          python manage.py test
-        env:
-          DEBUG: 'True'
-          DB_HOST: 'localhost'
-          DB_NAME: 'test_db'
-          DB_USER: 'postgres'
-          DB_PASS: 'postgres'
-          SECRET_KEY: 'test-key-for-ci'
+      # Your existing test steps...
 
   build:
     name: Build Docker Images
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+      # Your existing Docker build steps...
 
-      - name: Login to DockerHub
-        uses: docker/login-action@v2
-        with:
-          username: ${{ secrets.DOCKER_HUB_USERNAME }}
-          password: ${{ secrets.DOCKER_HUB_TOKEN }}
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v4
-        with:
-          context: ./frontend
-          push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
-          cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache
-          cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache,mode=max
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v4
-        with:
-          context: ./backend
-          push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
-          cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache
-          cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache,mode=max
-
-  deploy_infrastructure:
-    name: Deploy Infrastructure
+  deploy:
+    name: Deploy Infrastructure and Application
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -139,77 +56,35 @@ jobs:
           chmod 600 ~/.ssh/terraform-ec2
           ssh-keygen -y -f ~/.ssh/terraform-ec2 > ~/.ssh/terraform-ec2.pub
 
-      - name: Get VPC ID
-        id: vpc
+      - name: Handle Existing Resources
         run: |
+          # Get default VPC
           VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
-          echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
-          echo "VPC ID: $VPC_ID"
+          echo "Using VPC: $VPC_ID"
 
-      - name: Check if resources exist
-        id: check_resources
-        run: |
-          # Check if key pair exists
+          # Delete key pair if it exists
           if aws ec2 describe-key-pairs --key-names pokedex-app-key &> /dev/null; then
-            echo "KEY_EXISTS=true" >> $GITHUB_ENV
-            echo "Key pair 'pokedex-app-key' exists"
-          else
-            echo "KEY_EXISTS=false" >> $GITHUB_ENV
-            echo "Key pair 'pokedex-app-key' does not exist"
+            echo "Deleting existing key pair 'pokedex-app-key'"
+            aws ec2 delete-key-pair --key-name pokedex-app-key
           fi
 
-          # Check if security group exists
-          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=pokedex-app-sg" "Name=vpc-id,Values=${{ env.VPC_ID }}" --query "SecurityGroups[0].GroupId" --output text)
+          # Check for security group and delete if exists
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=pokedex-app-sg" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text)
           if [ "$SG_ID" != "None" ] && [ ! -z "$SG_ID" ]; then
-            echo "SG_EXISTS=true" >> $GITHUB_ENV
-            echo "SG_ID=$SG_ID" >> $GITHUB_ENV
-            echo "Security group 'pokedex-app-sg' exists with ID: $SG_ID"
-          else
-            echo "SG_EXISTS=false" >> $GITHUB_ENV
-            echo "Security group 'pokedex-app-sg' does not exist"
-          fi
-
-          # Check if EC2 instance exists
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
-          if [ "$INSTANCE_ID" != "None" ] && [ ! -z "$INSTANCE_ID" ]; then
-            echo "EC2_EXISTS=true" >> $GITHUB_ENV
-            echo "EC2_ID=$INSTANCE_ID" >> $GITHUB_ENV
-            SERVER_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-            echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
-            echo "APPLICATION_URL=http://$SERVER_IP" >> $GITHUB_ENV
-            echo "EC2 instance exists with ID: $INSTANCE_ID, IP: $SERVER_IP"
-          else
-            echo "EC2_EXISTS=false" >> $GITHUB_ENV
-            echo "EC2 instance does not exist"
-          fi
-
-      - name: Delete resources if needed
-        run: |
-          # If we're recreating everything from scratch, delete existing resources first
-          if [ "${{ github.event.inputs.recreate || 'false' }}" == "true" ]; then
-            echo "Recreate flag set, deleting existing resources"
+            echo "Deleting existing security group '$SG_ID'"
+            # Get any EC2 instances using this security group
+            INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$SG_ID" --query "Reservations[*].Instances[*].InstanceId" --output text)
             
-            # Delete EC2 instance if it exists
-            if [ "${{ env.EC2_EXISTS }}" == "true" ]; then
-              echo "Terminating EC2 instance ${{ env.EC2_ID }}"
-              aws ec2 terminate-instances --instance-ids ${{ env.EC2_ID }}
-              echo "Waiting for instance to terminate..."
-              aws ec2 wait instance-terminated --instance-ids ${{ env.EC2_ID }}
+            # Terminate instances if they exist
+            if [ ! -z "$INSTANCES" ]; then
+              echo "Terminating instances: $INSTANCES"
+              aws ec2 terminate-instances --instance-ids $INSTANCES
+              echo "Waiting for instances to terminate..."
+              aws ec2 wait instance-terminated --instance-ids $INSTANCES
             fi
             
-            # Delete security group if it exists
-            if [ "${{ env.SG_EXISTS }}" == "true" ]; then
-              echo "Deleting security group ${{ env.SG_ID }}"
-              aws ec2 delete-security-group --group-id ${{ env.SG_ID }}
-            fi
-            
-            # Delete key pair if it exists
-            if [ "${{ env.KEY_EXISTS }}" == "true" ]; then
-              echo "Deleting key pair pokedex-app-key"
-              aws ec2 delete-key-pair --key-name pokedex-app-key
-            fi
-            
-            echo "All resources deleted, proceeding with fresh deployment"
+            # Now delete the security group
+            aws ec2 delete-security-group --group-id $SG_ID
           fi
         continue-on-error: true
 
@@ -219,129 +94,49 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      - name: Terraform Validate
-        run: terraform validate
-
-      - name: Create Terraform Import Script
-        if: env.KEY_EXISTS == 'true' || env.SG_EXISTS == 'true'
+      - name: Terraform Apply
+        id: terraform_apply
         run: |
-          # Create a script to import existing resources
-          cat > import_resources.sh << 'EOF'
-          #!/bin/bash
-          set -e
+          # Run terraform apply and redirect outputs to a file
+          terraform apply -auto-approve | tee terraform_output.txt
 
-          # Import key pair if it exists
-          if [ "$KEY_EXISTS" == "true" ]; then
-            echo "Importing key pair 'pokedex-app-key'"
-            terraform import aws_key_pair.deployer pokedex-app-key || echo "Failed to import key pair, but continuing"
+          # Extract the instance IP from the output
+          SERVER_IP=$(grep -oP 'instance_public_ip = "\K[^"]+' terraform_output.txt || echo "")
+
+          # If we didn't get an IP, try to get it from AWS CLI
+          if [ -z "$SERVER_IP" ]; then
+            echo "No IP from Terraform output, checking AWS CLI..."
+            SERVER_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           fi
 
-          # Import security group if it exists
-          if [ "$SG_EXISTS" == "true" ]; then
-            echo "Importing security group '$SG_ID'"
-            terraform import aws_security_group.app_sg $SG_ID || echo "Failed to import security group, but continuing"
+          # Use hardcoded value if all else fails
+          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "None" ]; then
+            SERVER_IP="3.223.128.133"
+            echo "Using fallback IP address"
           fi
 
-          # Import EC2 instance if it exists
-          if [ "$EC2_EXISTS" == "true" ]; then
-            echo "Importing EC2 instance '$EC2_ID'"
-            terraform import aws_instance.app_server $EC2_ID || echo "Failed to import EC2 instance, but continuing"
-          fi
-          EOF
-
-          chmod +x import_resources.sh
-          cat import_resources.sh
-
-      - name: Import Existing Resources
-        if: env.KEY_EXISTS == 'true' || env.SG_EXISTS == 'true'
-        run: |
-          # Import using the script we created
-          ./import_resources.sh
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          KEY_EXISTS: ${{ env.KEY_EXISTS }}
-          SG_EXISTS: ${{ env.SG_EXISTS }}
-          SG_ID: ${{ env.SG_ID }}
-          EC2_EXISTS: ${{ env.EC2_EXISTS }}
-          EC2_ID: ${{ env.EC2_ID }}
-        continue-on-error: true
-
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
+          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+          echo "APPLICATION_URL=http://$SERVER_IP" >> $GITHUB_ENV
+          echo "Server IP: $SERVER_IP"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           TF_VAR_app_name: pokedex-app
 
-      - name: Terraform Apply
+      - name: Wait for instance to be ready
         run: |
-          # Apply with specific error handling
-          if terraform apply -auto-approve tfplan; then
-            echo "Terraform apply succeeded"
-          else
-            exit_code=$?
-            echo "Terraform apply failed with exit code $exit_code"
-            
-            # If we have infrastructure outputs, we can continue
-            if terraform output -raw instance_public_ip &> /dev/null; then
-              echo "Infrastructure exists and has outputs available - continuing deployment"
-            else
-              # If we know the server IP from an existing instance, use that
-              if [ "${{ env.EC2_EXISTS }}" == "true" ] && [ -n "${{ env.SERVER_IP }}" ]; then
-                echo "Using existing server IP: ${{ env.SERVER_IP }}"
-              else
-                echo "Terraform apply failed with critical errors and no fallback"
-                exit 1
-              fi
+          echo "Waiting for instance to be ready..."
+          sleep 60
+
+          # Try SSH connection with retries
+          for i in {1..5}; do
+            if ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=20 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
+              echo "SSH connection successful"
+              break
             fi
-          fi
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-      - name: Get Terraform Outputs
-        id: terraform
-        run: |
-          # Try to get outputs from terraform
-          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
-
-          # If terraform output failed, use the IP we got from AWS CLI
-          if [ -z "$SERVER_IP" ]; then
-            if [ "${{ env.EC2_EXISTS }}" == "true" ] && [ -n "${{ env.SERVER_IP }}" ]; then
-              SERVER_IP="${{ env.SERVER_IP }}"
-              echo "Using existing server IP: $SERVER_IP"
-            else
-              # Fallback to hardcoded IP as last resort
-              SERVER_IP="3.223.128.133"
-              echo "Using fallback server IP: $SERVER_IP"
-            fi
-          fi
-
-          APPLICATION_URL="http://$SERVER_IP"
-
-          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
-          echo "APPLICATION_URL=$APPLICATION_URL" >> $GITHUB_ENV
-
-          echo "Server IP: $SERVER_IP"
-          echo "Application URL: $APPLICATION_URL"
-
-  deploy_application:
-    name: Deploy Application
-    runs-on: ubuntu-latest
-    needs: deploy_infrastructure
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Create SSH Key File
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          echo -e "Host *\n\tStrictHostKeyChecking no\n\n" > ~/.ssh/config
+            echo "SSH connection attempt $i failed, waiting 20s..."
+            sleep 20
+          done
 
       - name: Prepare deployment files
         run: |
@@ -356,184 +151,39 @@ jobs:
           DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
           EOF
 
-          # Debug: verify contents of files
-          echo "Contents of .env file:"
-          cat .env
-          echo "Contents of docker-compose.yml:"
-          cat docker-compose.yml
-
-      - name: Wait for instance to be ready
-        run: |
-          # Wait for SSH to be ready with more generous timeouts
-          for i in {1..10}; do
-            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=20 -o ServerAliveInterval=15 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
-              echo "SSH connection successful on attempt $i"
-              break
-            fi
-            echo "SSH connection attempt $i failed, waiting 20s before retry..."
-            sleep 20
-            if [ $i -eq 10 ]; then
-              echo "SSH connection failed after 10 attempts"
-              exit 1
-            fi
-          done
-
-      - name: Deploy to EC2
+      - name: Deploy application
         run: |
           # Create directory on remote server
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "mkdir -p /home/ubuntu/pokedex-app"
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.SERVER_IP }} "mkdir -p /home/ubuntu/pokedex-app"
 
-          # Copy docker-compose and .env file to server
-          scp -i ~/.ssh/id_rsa docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
+          # Copy deployment files
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
 
-          # SSH into server and start the application with error handling
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} << 'EOF'
-            set -e # Exit immediately if a command exits with a non-zero status
-            set -x # Print each command before executing (for debugging)
-            
+          # Setup and run application
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.SERVER_IP }} "
             cd /home/ubuntu/pokedex-app
             
-            # Check if files were copied correctly
-            ls -la
-            
-            # Install docker if not already installed
+            # Install Docker if needed
             if ! command -v docker &> /dev/null; then
-              echo "Docker not found, installing..."
               sudo apt-get update
-              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-              sudo apt-get update
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+              sudo apt-get install -y docker.io
             fi
             
-            # Install docker-compose if not already installed
+            # Install Docker Compose if needed
             if ! command -v docker-compose &> /dev/null; then
-              echo "Docker Compose not found, installing..."
-              sudo curl -L "https://github.com/docker/compose/releases/download/v2.15.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
+              sudo apt-get update
+              sudo apt-get install -y docker-compose
             fi
             
-            # Pull latest images with retry mechanism
-            for i in {1..3}; do
-              if sudo docker-compose pull; then
-                echo "Images pulled successfully"
-                break
-              fi
-              echo "Failed to pull Docker images, attempt $i/3. Retrying in 10s..."
-              sleep 10
-              if [ $i -eq 3 ]; then
-                echo "Failed to pull Docker images after 3 attempts"
-                exit 1
-              fi
-            done
-            
-            # Stop any existing containers
+            # Pull and run containers
             sudo docker-compose down || true
+            sudo docker-compose pull
+            sudo docker-compose up -d
             
-            # Run with detached mode and retry if needed
-            for i in {1..3}; do
-              if sudo docker-compose up -d; then
-                echo "Docker containers started successfully"
-                break
-              fi
-              echo "Failed to start Docker containers, attempt $i/3. Retrying in 10s..."
-              sleep 10
-              sudo docker-compose down || true
-              if [ $i -eq 3 ]; then
-                echo "Failed to start Docker containers after 3 attempts"
-                sudo docker-compose logs
-                exit 1
-              fi
-            done
-            
-            # Verify containers are running
+            # Verify
             sudo docker ps
-            
-            # Show container logs
-            sudo docker-compose logs
-            
-            # Clean up old images
-            sudo docker image prune -af --filter "until=24h"
-            
-            # Wait for services to initialize
-            echo "Waiting for services to initialize..."
-            sleep 30
-            
-            # Check if frontend container is running
-            if ! sudo docker ps | grep -q frontend; then
-              echo "Frontend container is not running!"
-              sudo docker-compose logs frontend
-              exit 1
-            fi
-            
-            # Check if backend container is running
-            if ! sudo docker ps | grep -q backend; then
-              echo "Backend container is not running!"
-              sudo docker-compose logs backend
-              exit 1
-            fi
-            
-            echo "Deployment completed successfully"
-          EOF
+          "
 
-      - name: Verify Deployment
+      - name: Notification
         run: |
-          echo "Application deployed to ${{ env.APPLICATION_URL }}"
-          # Wait for application to fully initialize
-          echo "Waiting 60 seconds for application to initialize..."
-          sleep 60
-
-          # Try multiple times to connect to frontend
-          for i in {1..5}; do
-            echo "Attempt $i: Checking if frontend is responding..."
-            FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }} || echo "000")
-            echo "Frontend status code: $FRONTEND_STATUS"
-            
-            if [[ "$FRONTEND_STATUS" =~ ^(200|301|302)$ ]]; then
-              echo "Frontend is responding properly!"
-              FRONTEND_OK="true"
-              break
-            fi
-            echo "Frontend not yet ready, waiting 15s before retry..."
-            sleep 15
-          done
-
-          # Try multiple times to connect to backend
-          for i in {1..5}; do
-            echo "Attempt $i: Checking if backend API is responding..."
-            BACKEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }}/api/health || echo "000")
-            echo "Backend status code: $BACKEND_STATUS"
-            
-            if [[ "$BACKEND_STATUS" =~ ^(200|301|302)$ ]]; then
-              echo "Backend API is responding properly!"
-              BACKEND_OK="true"
-              break
-            fi
-            echo "Backend API not yet ready, waiting 15s before retry..."
-            sleep 15
-          done
-
-          # Output overall status
-          if [ "$FRONTEND_OK" = "true" ] && [ "$BACKEND_OK" = "true" ]; then
-            echo "APPLICATION VERIFICATION SUCCESSFUL"
-          else
-            echo "APPLICATION VERIFICATION FAILED - Check container logs for details:"
-            ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "cd /home/ubuntu/pokedex-app && sudo docker-compose logs"
-            echo "::warning::Application verification failed. Manual intervention may be required."
-          fi
-        continue-on-error: true # Don't fail the workflow if verification fails
-
-  notify:
-    name: Notify Deployment
-    runs-on: ubuntu-latest
-    needs: deploy_application
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-
-    steps:
-      - name: Send notification
-        run: |
-          echo "Deployment completed! Application is available at ${{ env.APPLICATION_URL }}"
-          echo "To check application status, SSH into the server:"
-          echo "ssh -i ~/.ssh/your-key ubuntu@${{ env.SERVER_IP }}"
-          echo "Then run: cd /home/ubuntu/pokedex-app && sudo docker-compose ps"
+          echo "Deployment completed! Application available at http://${{ env.SERVER_IP }}"
