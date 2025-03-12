@@ -104,11 +104,64 @@ jobs:
             type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
             }}/pokedex-backend:buildcache,mode=max
 
-  deploy_infrastructure:
-    name: Deploy Infrastructure
+  check_infrastructure:
+    name: Check Infrastructure Status
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    outputs:
+      infrastructure_exists:
+        ${{ steps.check_infra.outputs.infrastructure_exists }}
+      server_ip: ${{ steps.get_ip.outputs.server_ip }}
+      application_url: ${{ steps.get_ip.outputs.application_url }}
+
+    steps:
+      - name: Install AWS CLI
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Check if infrastructure exists
+        id: check_infra
+        run: |
+          # Check if EC2 instance with the tag 'Name=pokedex-app' exists and is running
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+
+          if [ "$INSTANCE_ID" != "None" ] && [ ! -z "$INSTANCE_ID" ]; then
+            echo "EC2 instance exists with ID: $INSTANCE_ID"
+            echo "infrastructure_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "EC2 instance does not exist or is not running"
+            echo "infrastructure_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get server IP
+        id: get_ip
+        run: |
+          # If infrastructure exists, get the IP
+          if [[ "${{ steps.check_infra.outputs.infrastructure_exists }}" == "true" ]]; then
+            SERVER_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+            echo "Server IP found: $SERVER_IP"
+          else
+            # Default IP if needed later
+            SERVER_IP="0.0.0.0"
+            echo "No existing infrastructure found"
+          fi
+
+          APPLICATION_URL="http://$SERVER_IP"
+
+          echo "server_ip=$SERVER_IP" >> $GITHUB_OUTPUT
+          echo "application_url=$APPLICATION_URL" >> $GITHUB_OUTPUT
+
+  deploy_infrastructure:
+    name: Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: check_infrastructure
+    if:
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.check_infrastructure.outputs.infrastructure_exists == 'false'
 
     steps:
       - name: Checkout code
@@ -143,18 +196,7 @@ jobs:
           TF_VAR_app_name: pokedex-app
 
       - name: Terraform Apply
-        run: |
-          # Run terraform apply and continue even if there are resource existence errors
-          terraform apply -auto-approve tfplan || true
-
-          # Check if the error was just about duplicate resources
-          if terraform output -raw instance_public_ip > /dev/null 2>&1; then
-            echo "Infrastructure exists and has outputs available - continuing deployment"
-            exit 0
-          else
-            echo "Terraform apply failed with critical errors"
-            exit 1
-          fi
+        run: terraform apply -auto-approve tfplan
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -162,8 +204,9 @@ jobs:
       - name: Get Terraform Outputs
         id: terraform
         run: |
-          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "3.223.128.133")
-          APPLICATION_URL=$(terraform output -raw application_url 2>/dev/null || echo "http://3.223.128.133")
+          # Get the outputs from terraform
+          SERVER_IP=$(terraform output -raw instance_public_ip)
+          APPLICATION_URL=$(terraform output -raw application_url)
 
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
           echo "APPLICATION_URL=$APPLICATION_URL" >> $GITHUB_ENV
@@ -171,15 +214,32 @@ jobs:
           echo "Server IP: $SERVER_IP"
           echo "Application URL: $APPLICATION_URL"
 
+          # Wait for the instance to be fully initialized
+          echo "Waiting for instance to initialize..."
+          sleep 60
+
   deploy_application:
     name: Deploy Application
     runs-on: ubuntu-latest
-    needs: deploy_infrastructure
+    needs: [check_infrastructure, deploy_infrastructure]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
+      - name: Set server IP environment variable
+        run: |
+          if [[ "${{ needs.check_infrastructure.outputs.infrastructure_exists }}" == "true" ]]; then
+            echo "SERVER_IP=${{ needs.check_infrastructure.outputs.server_ip }}" >> $GITHUB_ENV
+            echo "APPLICATION_URL=${{ needs.check_infrastructure.outputs.application_url }}" >> $GITHUB_ENV
+          else
+            # If we created new infrastructure, the variables should be set from previous job
+            echo "Using newly created infrastructure"
+          fi
+
+          echo "Using Server IP: ${{ env.SERVER_IP }}"
+          echo "Using Application URL: ${{ env.APPLICATION_URL }}"
 
       - name: Create SSH Key File
         run: |
@@ -190,7 +250,7 @@ jobs:
 
       - name: Prepare deployment files
         run: |
-          # Create .env file for production with DOCKER_HUB_USERNAME included
+          # Create .env file for production
           cat > .env << EOF
           DB_USER=${{ secrets.DB_USER }}
           DB_PASS=${{ secrets.DB_PASS }}
@@ -209,20 +269,20 @@ jobs:
 
       - name: Deploy to EC2
         run: |
-          # Wait for SSH to be ready
-          for i in {1..5}; do
-            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
+          # Wait for SSH to be ready with more generous timeouts
+          for i in {1..10}; do
+            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=20 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
               break
             fi
-            echo "SSH connection attempt $i failed, waiting 10s before retry..."
-            sleep 10
+            echo "SSH connection attempt $i failed, waiting 20s before retry..."
+            sleep 20
           done
 
           # Create directory on remote server
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "mkdir -p /home/ubuntu/pokedex-app"
 
-          # Copy docker-compose and .env file to server with verbose flag
-          scp -v -i ~/.ssh/id_rsa docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
+          # Copy docker-compose and .env file to server
+          scp -i ~/.ssh/id_rsa docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
 
           # SSH into server and start the application with error handling
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} << 'EOF'
@@ -233,20 +293,57 @@ jobs:
             
             # Check if files were copied correctly
             ls -la
-            cat .env
             
-            # Pull latest images with error handling
-            if ! sudo docker-compose pull; then
-              echo "Failed to pull Docker images"
-              exit 1
+            # Install docker if not already installed
+            if ! command -v docker &> /dev/null; then
+              echo "Docker not found, installing..."
+              sudo apt-get update
+              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io
             fi
             
-            # Run with detached mode
-            if ! sudo docker-compose up -d; then
-              echo "Failed to start Docker containers"
-              sudo docker-compose logs
-              exit 1
+            # Install docker-compose if not already installed
+            if ! command -v docker-compose &> /dev/null; then
+              echo "Docker Compose not found, installing..."
+              sudo curl -L "https://github.com/docker/compose/releases/download/v2.15.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
             fi
+            
+            # Pull latest images with retry mechanism
+            for i in {1..3}; do
+              if sudo docker-compose pull; then
+                echo "Images pulled successfully"
+                break
+              fi
+              echo "Failed to pull Docker images, attempt $i/3. Retrying in 10s..."
+              sleep 10
+              if [ $i -eq 3 ]; then
+                echo "Failed to pull Docker images after 3 attempts"
+                exit 1
+              fi
+            done
+            
+            # Stop any existing containers
+            sudo docker-compose down || true
+            
+            # Run with detached mode and retry if needed
+            for i in {1..3}; do
+              if sudo docker-compose up -d; then
+                echo "Docker containers started successfully"
+                break
+              fi
+              echo "Failed to start Docker containers, attempt $i/3. Retrying in 10s..."
+              sleep 10
+              sudo docker-compose down || true
+              if [ $i -eq 3 ]; then
+                echo "Failed to start Docker containers after 3 attempts"
+                sudo docker-compose logs
+                exit 1
+              fi
+            done
             
             # Verify containers are running
             sudo docker ps
@@ -255,11 +352,11 @@ jobs:
             sudo docker-compose logs
             
             # Clean up old images
-            sudo docker image prune -a -f
+            sudo docker image prune -af --filter "until=24h"
             
             # Wait for services to initialize
             echo "Waiting for services to initialize..."
-            sleep 20
+            sleep 30
             
             # Check if frontend container is running
             if ! sudo docker ps | grep -q frontend; then
@@ -281,23 +378,48 @@ jobs:
       - name: Verify Deployment
         run: |
           echo "Application deployed to ${{ env.APPLICATION_URL }}"
-          # Wait longer for application to start (increased from 30s to 60s)
+          # Wait for application to fully initialize
           echo "Waiting 60 seconds for application to initialize..."
           sleep 60
 
-          # Try multiple times to connect
+          # Try multiple times to connect to frontend
           for i in {1..5}; do
-            echo "Attempt $i: Checking if application is responding..."
-            if curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }} | grep -q "200\|301\|302"; then
-              echo "Application is responding properly!"
-              exit 0
+            echo "Attempt $i: Checking if frontend is responding..."
+            FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }} || echo "000")
+            echo "Frontend status code: $FRONTEND_STATUS"
+            
+            if [[ "$FRONTEND_STATUS" =~ ^(200|301|302)$ ]]; then
+              echo "Frontend is responding properly!"
+              FRONTEND_OK="true"
+              break
             fi
-            echo "Application not yet ready, waiting 10s before retry..."
-            sleep 10
+            echo "Frontend not yet ready, waiting 15s before retry..."
+            sleep 15
           done
 
-          echo "WARNING: Could not verify application is responding. Check logs manually."
-          exit 1
+          # Try multiple times to connect to backend
+          for i in {1..5}; do
+            echo "Attempt $i: Checking if backend API is responding..."
+            BACKEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }}/api/health || echo "000")
+            echo "Backend status code: $BACKEND_STATUS"
+            
+            if [[ "$BACKEND_STATUS" =~ ^(200|301|302)$ ]]; then
+              echo "Backend API is responding properly!"
+              BACKEND_OK="true"
+              break
+            fi
+            echo "Backend API not yet ready, waiting 15s before retry..."
+            sleep 15
+          done
+
+          # Output overall status
+          if [ "$FRONTEND_OK" = "true" ] && [ "$BACKEND_OK" = "true" ]; then
+            echo "APPLICATION VERIFICATION SUCCESSFUL"
+          else
+            echo "APPLICATION VERIFICATION FAILED - Check container logs for details:"
+            ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "cd /home/ubuntu/pokedex-app && sudo docker-compose logs"
+            echo "::warning::Application verification failed. Manual intervention may be required."
+          fi
         continue-on-error: true # Don't fail the workflow if verification fails
 
   notify:
@@ -313,3 +435,9 @@ jobs:
           echo "To check application status, SSH into the server:"
           echo "ssh -i ~/.ssh/your-key ubuntu@${{ env.SERVER_IP }}"
           echo "Then run: cd /home/ubuntu/pokedex-app && sudo docker-compose ps"
+
+          # You could add actual notification methods here like:
+          # - Slack webhook
+          # - Email notification
+          # - MS Teams webhook
+          # - etc.
