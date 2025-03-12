@@ -3,11 +3,9 @@ version: '3.8'
 services:
   # Frontend application
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    image: ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
     ports:
-      - '8080:80'
+      - '80:80'
     depends_on:
       - backend
     environment:
@@ -18,43 +16,38 @@ services:
 
   # Backend API service
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    image: ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
     ports:
       - '3000:3000'
     depends_on:
       db:
         condition: service_healthy
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
+      - DEBUG=False
+      - SECRET_KEY=${DJANGO_SECRET_KEY}
       - DB_HOST=db
       - DB_PORT=5432
-      - DB_USER=${DB_USER:-postgres}
-      - DB_PASS=${DB_PASS:-postgres}
-      - DB_NAME=${DB_NAME:-pokedex}
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - DB_NAME=${DB_NAME}
     restart: unless-stopped
     networks:
       - app-network
-    volumes:
-      - ./backend:/app
 
   # Database service
   db:
     image: postgres:15-alpine
-    ports:
-      - '5432:5432'
-    environment:
-      - POSTGRES_USER=${DB_USER:-postgres}
-      - POSTGRES_PASSWORD=${DB_PASS:-postgres}
-      - POSTGRES_DB=${DB_NAME:-pokedex}
     volumes:
       - db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASS}
+      - POSTGRES_DB=${DB_NAME}
     restart: unless-stopped
     networks:
       - app-network
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,4 +58,6 @@ networks:
 
 volumes:
   db-data:
+    driver: local
+  backend-static:
     driver: local
