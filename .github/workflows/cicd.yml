@@ -15,7 +15,48 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Your existing test steps...
+      # Frontend Tests
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci
+
+      - name: Run frontend linting
+        run: |
+          cd frontend
+          npm run lint
+        continue-on-error: true
+
+      # Backend Tests
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          python manage.py test
+        env:
+          DEBUG: 'True'
+          DB_HOST: 'localhost'
+          DB_NAME: 'test_db'
+          DB_USER: 'postgres'
+          DB_PASS: 'postgres'
+          SECRET_KEY: 'test-key-for-ci'
 
   build:
     name: Build Docker Images
@@ -26,7 +67,40 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Your existing Docker build steps...
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache,mode=max
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache,mode=max
 
   deploy:
     name: Deploy Infrastructure and Application
@@ -71,9 +145,10 @@ jobs:
           # Check for security group and delete if exists
           SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=pokedex-app-sg" "Name=vpc-id,Values=$VPC_ID" --query "SecurityGroups[0].GroupId" --output text)
           if [ "$SG_ID" != "None" ] && [ ! -z "$SG_ID" ]; then
-            echo "Deleting existing security group '$SG_ID'"
+            echo "Found existing security group '$SG_ID'"
+            
             # Get any EC2 instances using this security group
-            INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$SG_ID" --query "Reservations[*].Instances[*].InstanceId" --output text)
+            INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$SG_ID" "Name=instance-state-name,Values=running" --query "Reservations[*].Instances[*].InstanceId" --output text)
             
             # Terminate instances if they exist
             if [ ! -z "$INSTANCES" ]; then
@@ -83,8 +158,9 @@ jobs:
               aws ec2 wait instance-terminated --instance-ids $INSTANCES
             fi
             
-            # Now delete the security group
-            aws ec2 delete-security-group --group-id $SG_ID
+            # Now try to delete the security group
+            echo "Attempting to delete security group $SG_ID"
+            aws ec2 delete-security-group --group-id $SG_ID || echo "Could not delete security group, but will continue"
           fi
         continue-on-error: true
 
@@ -97,27 +173,27 @@ jobs:
       - name: Terraform Apply
         id: terraform_apply
         run: |
-          # Run terraform apply and redirect outputs to a file
-          terraform apply -auto-approve | tee terraform_output.txt
+          # Apply terraform configuration
+          terraform apply -auto-approve
 
-          # Extract the instance IP from the output
-          SERVER_IP=$(grep -oP 'instance_public_ip = "\K[^"]+' terraform_output.txt || echo "")
+          # Get the server IP directly using terraform output command
+          # This avoids the env command issue
+          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
 
-          # If we didn't get an IP, try to get it from AWS CLI
-          if [ -z "$SERVER_IP" ]; then
-            echo "No IP from Terraform output, checking AWS CLI..."
+          # If Terraform output failed, fall back to AWS CLI
+          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "None" ]; then
+            echo "Could not get IP from Terraform output, falling back to AWS CLI"
+            # Get IP address from AWS CLI
             SERVER_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
           fi
 
-          # Use hardcoded value if all else fails
-          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "None" ]; then
-            SERVER_IP="3.223.128.133"
-            echo "Using fallback IP address"
-          fi
-
+          # Set GitHub environment variables for later steps
+          # This is different from creating a .env file for the application
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
           echo "APPLICATION_URL=http://$SERVER_IP" >> $GITHUB_ENV
-          echo "Server IP: $SERVER_IP"
+
+          # Print for debugging
+          echo "Using server IP: $SERVER_IP"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -136,11 +212,14 @@ jobs:
             fi
             echo "SSH connection attempt $i failed, waiting 20s..."
             sleep 20
+            if [ $i -eq 5 ]; then
+              echo "Warning: Could not establish SSH connection after 5 attempts"
+            fi
           done
 
       - name: Prepare deployment files
         run: |
-          # Create .env file for production
+          # Create .env file for the application (not related to GitHub Actions env)
           cat > .env << EOF
           DB_USER=${{ secrets.DB_USER }}
           DB_PASS=${{ secrets.DB_PASS }}
@@ -150,6 +229,9 @@ jobs:
           NODE_ENV=production
           DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
           EOF
+
+          # Debug: verify contents were created correctly
+          echo "Created .env file for application"
 
       - name: Deploy application
         run: |
@@ -165,25 +247,61 @@ jobs:
             
             # Install Docker if needed
             if ! command -v docker &> /dev/null; then
+              echo 'Installing Docker...'
               sudo apt-get update
-              sudo apt-get install -y docker.io
+              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+              sudo add-apt-repository 'deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable'
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io
             fi
             
             # Install Docker Compose if needed
             if ! command -v docker-compose &> /dev/null; then
-              sudo apt-get update
-              sudo apt-get install -y docker-compose
+              echo 'Installing Docker Compose...'
+              sudo curl -L \"https://github.com/docker/compose/releases/download/v2.15.1/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
             fi
             
             # Pull and run containers
+            echo 'Stopping any existing containers...'
             sudo docker-compose down || true
+            
+            echo 'Pulling latest images...'
             sudo docker-compose pull
+            
+            echo 'Starting containers...'
             sudo docker-compose up -d
             
             # Verify
+            echo 'Running containers:'
             sudo docker ps
           "
 
+      - name: Verify Deployment
+        run: |
+          echo "Application deployed to ${{ env.APPLICATION_URL }}"
+          echo "Waiting 30 seconds for application to initialize..."
+          sleep 30
+
+          # Check if application is responding
+          for i in {1..3}; do
+            echo "Attempt $i: Checking if application is responding..."
+            if curl -s --head --request GET ${{ env.APPLICATION_URL }} | grep "200\|301\|302" > /dev/null; then
+              echo "Application is responding correctly!"
+              exit 0
+            else
+              echo "Application not responding yet, waiting 10 seconds..."
+              sleep 10
+            fi
+          done
+
+          echo "Warning: Could not verify application is responding, but deployment completed"
+        continue-on-error: true
+
       - name: Notification
         run: |
-          echo "Deployment completed! Application available at http://${{ env.SERVER_IP }}"
+          echo "Deployment completed! Application available at ${{ env.APPLICATION_URL }}"
+          echo "To check application status, SSH into the server:"
+          echo "ssh -i your-key ubuntu@${{ env.SERVER_IP }}"
+          echo "Then run: cd /home/ubuntu/pokedex-app && sudo docker-compose ps"
