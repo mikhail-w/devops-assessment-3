@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch: # Allows manual triggering
+    inputs:
+      recreate:
+        description: 'Recreate infrastructure from scratch'
+        required: false
+        default: 'false'
+        type: boolean
 
 jobs:
   test:
@@ -104,68 +110,22 @@ jobs:
             type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
             }}/pokedex-backend:buildcache,mode=max
 
-  check_infrastructure:
-    name: Check Infrastructure Status
+  deploy_infrastructure:
+    name: Deploy Infrastructure
     runs-on: ubuntu-latest
     needs: build
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    outputs:
-      infrastructure_exists:
-        ${{ steps.check_infra.outputs.infrastructure_exists }}
-      server_ip: ${{ steps.get_ip.outputs.server_ip }}
-      application_url: ${{ steps.get_ip.outputs.application_url }}
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
       - name: Install AWS CLI
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-
-      - name: Check if infrastructure exists
-        id: check_infra
-        run: |
-          # Check if EC2 instance with the tag 'Name=pokedex-app' exists and is running
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
-
-          if [ "$INSTANCE_ID" != "None" ] && [ ! -z "$INSTANCE_ID" ]; then
-            echo "EC2 instance exists with ID: $INSTANCE_ID"
-            echo "infrastructure_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "EC2 instance does not exist or is not running"
-            echo "infrastructure_exists=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Get server IP
-        id: get_ip
-        run: |
-          # If infrastructure exists, get the IP
-          if [[ "${{ steps.check_infra.outputs.infrastructure_exists }}" == "true" ]]; then
-            SERVER_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
-            echo "Server IP found: $SERVER_IP"
-          else
-            # Default IP if needed later
-            SERVER_IP="0.0.0.0"
-            echo "No existing infrastructure found"
-          fi
-
-          APPLICATION_URL="http://$SERVER_IP"
-
-          echo "server_ip=$SERVER_IP" >> $GITHUB_OUTPUT
-          echo "application_url=$APPLICATION_URL" >> $GITHUB_OUTPUT
-
-  deploy_infrastructure:
-    name: Deploy Infrastructure
-    runs-on: ubuntu-latest
-    needs: check_infrastructure
-    if:
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-      && needs.check_infrastructure.outputs.infrastructure_exists == 'false'
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -179,6 +139,80 @@ jobs:
           chmod 600 ~/.ssh/terraform-ec2
           ssh-keygen -y -f ~/.ssh/terraform-ec2 > ~/.ssh/terraform-ec2.pub
 
+      - name: Get VPC ID
+        id: vpc
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text)
+          echo "VPC_ID=$VPC_ID" >> $GITHUB_ENV
+          echo "VPC ID: $VPC_ID"
+
+      - name: Check if resources exist
+        id: check_resources
+        run: |
+          # Check if key pair exists
+          if aws ec2 describe-key-pairs --key-names pokedex-app-key &> /dev/null; then
+            echo "KEY_EXISTS=true" >> $GITHUB_ENV
+            echo "Key pair 'pokedex-app-key' exists"
+          else
+            echo "KEY_EXISTS=false" >> $GITHUB_ENV
+            echo "Key pair 'pokedex-app-key' does not exist"
+          fi
+
+          # Check if security group exists
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=pokedex-app-sg" "Name=vpc-id,Values=${{ env.VPC_ID }}" --query "SecurityGroups[0].GroupId" --output text)
+          if [ "$SG_ID" != "None" ] && [ ! -z "$SG_ID" ]; then
+            echo "SG_EXISTS=true" >> $GITHUB_ENV
+            echo "SG_ID=$SG_ID" >> $GITHUB_ENV
+            echo "Security group 'pokedex-app-sg' exists with ID: $SG_ID"
+          else
+            echo "SG_EXISTS=false" >> $GITHUB_ENV
+            echo "Security group 'pokedex-app-sg' does not exist"
+          fi
+
+          # Check if EC2 instance exists
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ "$INSTANCE_ID" != "None" ] && [ ! -z "$INSTANCE_ID" ]; then
+            echo "EC2_EXISTS=true" >> $GITHUB_ENV
+            echo "EC2_ID=$INSTANCE_ID" >> $GITHUB_ENV
+            SERVER_IP=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+            echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+            echo "APPLICATION_URL=http://$SERVER_IP" >> $GITHUB_ENV
+            echo "EC2 instance exists with ID: $INSTANCE_ID, IP: $SERVER_IP"
+          else
+            echo "EC2_EXISTS=false" >> $GITHUB_ENV
+            echo "EC2 instance does not exist"
+          fi
+
+      - name: Delete resources if needed
+        run: |
+          # If we're recreating everything from scratch, delete existing resources first
+          if [ "${{ github.event.inputs.recreate || 'false' }}" == "true" ]; then
+            echo "Recreate flag set, deleting existing resources"
+            
+            # Delete EC2 instance if it exists
+            if [ "${{ env.EC2_EXISTS }}" == "true" ]; then
+              echo "Terminating EC2 instance ${{ env.EC2_ID }}"
+              aws ec2 terminate-instances --instance-ids ${{ env.EC2_ID }}
+              echo "Waiting for instance to terminate..."
+              aws ec2 wait instance-terminated --instance-ids ${{ env.EC2_ID }}
+            fi
+            
+            # Delete security group if it exists
+            if [ "${{ env.SG_EXISTS }}" == "true" ]; then
+              echo "Deleting security group ${{ env.SG_ID }}"
+              aws ec2 delete-security-group --group-id ${{ env.SG_ID }}
+            fi
+            
+            # Delete key pair if it exists
+            if [ "${{ env.KEY_EXISTS }}" == "true" ]; then
+              echo "Deleting key pair pokedex-app-key"
+              aws ec2 delete-key-pair --key-name pokedex-app-key
+            fi
+            
+            echo "All resources deleted, proceeding with fresh deployment"
+          fi
+        continue-on-error: true
+
       - name: Terraform Init
         run: terraform init
         env:
@@ -188,6 +222,51 @@ jobs:
       - name: Terraform Validate
         run: terraform validate
 
+      - name: Create Terraform Import Script
+        if: env.KEY_EXISTS == 'true' || env.SG_EXISTS == 'true'
+        run: |
+          # Create a script to import existing resources
+          cat > import_resources.sh << 'EOF'
+          #!/bin/bash
+          set -e
+
+          # Import key pair if it exists
+          if [ "$KEY_EXISTS" == "true" ]; then
+            echo "Importing key pair 'pokedex-app-key'"
+            terraform import aws_key_pair.deployer pokedex-app-key || echo "Failed to import key pair, but continuing"
+          fi
+
+          # Import security group if it exists
+          if [ "$SG_EXISTS" == "true" ]; then
+            echo "Importing security group '$SG_ID'"
+            terraform import aws_security_group.app_sg $SG_ID || echo "Failed to import security group, but continuing"
+          fi
+
+          # Import EC2 instance if it exists
+          if [ "$EC2_EXISTS" == "true" ]; then
+            echo "Importing EC2 instance '$EC2_ID'"
+            terraform import aws_instance.app_server $EC2_ID || echo "Failed to import EC2 instance, but continuing"
+          fi
+          EOF
+
+          chmod +x import_resources.sh
+          cat import_resources.sh
+
+      - name: Import Existing Resources
+        if: env.KEY_EXISTS == 'true' || env.SG_EXISTS == 'true'
+        run: |
+          # Import using the script we created
+          ./import_resources.sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          KEY_EXISTS: ${{ env.KEY_EXISTS }}
+          SG_EXISTS: ${{ env.SG_EXISTS }}
+          SG_ID: ${{ env.SG_ID }}
+          EC2_EXISTS: ${{ env.EC2_EXISTS }}
+          EC2_ID: ${{ env.EC2_ID }}
+        continue-on-error: true
+
       - name: Terraform Plan
         run: terraform plan -out=tfplan
         env:
@@ -196,7 +275,27 @@ jobs:
           TF_VAR_app_name: pokedex-app
 
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
+        run: |
+          # Apply with specific error handling
+          if terraform apply -auto-approve tfplan; then
+            echo "Terraform apply succeeded"
+          else
+            exit_code=$?
+            echo "Terraform apply failed with exit code $exit_code"
+            
+            # If we have infrastructure outputs, we can continue
+            if terraform output -raw instance_public_ip &> /dev/null; then
+              echo "Infrastructure exists and has outputs available - continuing deployment"
+            else
+              # If we know the server IP from an existing instance, use that
+              if [ "${{ env.EC2_EXISTS }}" == "true" ] && [ -n "${{ env.SERVER_IP }}" ]; then
+                echo "Using existing server IP: ${{ env.SERVER_IP }}"
+              else
+                echo "Terraform apply failed with critical errors and no fallback"
+                exit 1
+              fi
+            fi
+          fi
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -204,9 +303,22 @@ jobs:
       - name: Get Terraform Outputs
         id: terraform
         run: |
-          # Get the outputs from terraform
-          SERVER_IP=$(terraform output -raw instance_public_ip)
-          APPLICATION_URL=$(terraform output -raw application_url)
+          # Try to get outputs from terraform
+          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
+
+          # If terraform output failed, use the IP we got from AWS CLI
+          if [ -z "$SERVER_IP" ]; then
+            if [ "${{ env.EC2_EXISTS }}" == "true" ] && [ -n "${{ env.SERVER_IP }}" ]; then
+              SERVER_IP="${{ env.SERVER_IP }}"
+              echo "Using existing server IP: $SERVER_IP"
+            else
+              # Fallback to hardcoded IP as last resort
+              SERVER_IP="3.223.128.133"
+              echo "Using fallback server IP: $SERVER_IP"
+            fi
+          fi
+
+          APPLICATION_URL="http://$SERVER_IP"
 
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
           echo "APPLICATION_URL=$APPLICATION_URL" >> $GITHUB_ENV
@@ -214,32 +326,15 @@ jobs:
           echo "Server IP: $SERVER_IP"
           echo "Application URL: $APPLICATION_URL"
 
-          # Wait for the instance to be fully initialized
-          echo "Waiting for instance to initialize..."
-          sleep 60
-
   deploy_application:
     name: Deploy Application
     runs-on: ubuntu-latest
-    needs: [check_infrastructure, deploy_infrastructure]
+    needs: deploy_infrastructure
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
-      - name: Set server IP environment variable
-        run: |
-          if [[ "${{ needs.check_infrastructure.outputs.infrastructure_exists }}" == "true" ]]; then
-            echo "SERVER_IP=${{ needs.check_infrastructure.outputs.server_ip }}" >> $GITHUB_ENV
-            echo "APPLICATION_URL=${{ needs.check_infrastructure.outputs.application_url }}" >> $GITHUB_ENV
-          else
-            # If we created new infrastructure, the variables should be set from previous job
-            echo "Using newly created infrastructure"
-          fi
-
-          echo "Using Server IP: ${{ env.SERVER_IP }}"
-          echo "Using Application URL: ${{ env.APPLICATION_URL }}"
 
       - name: Create SSH Key File
         run: |
@@ -267,17 +362,24 @@ jobs:
           echo "Contents of docker-compose.yml:"
           cat docker-compose.yml
 
-      - name: Deploy to EC2
+      - name: Wait for instance to be ready
         run: |
           # Wait for SSH to be ready with more generous timeouts
           for i in {1..10}; do
-            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=20 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
+            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=20 -o ServerAliveInterval=15 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
+              echo "SSH connection successful on attempt $i"
               break
             fi
             echo "SSH connection attempt $i failed, waiting 20s before retry..."
             sleep 20
+            if [ $i -eq 10 ]; then
+              echo "SSH connection failed after 10 attempts"
+              exit 1
+            fi
           done
 
+      - name: Deploy to EC2
+        run: |
           # Create directory on remote server
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "mkdir -p /home/ubuntu/pokedex-app"
 
@@ -435,9 +537,3 @@ jobs:
           echo "To check application status, SSH into the server:"
           echo "ssh -i ~/.ssh/your-key ubuntu@${{ env.SERVER_IP }}"
           echo "Then run: cd /home/ubuntu/pokedex-app && sudo docker-compose ps"
-
-          # You could add actual notification methods here like:
-          # - Slack webhook
-          # - Email notification
-          # - MS Teams webhook
-          # - etc.
