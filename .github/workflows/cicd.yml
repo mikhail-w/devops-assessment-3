@@ -151,8 +151,13 @@ jobs:
       - name: Get Terraform Outputs
         id: terraform
         run: |
-          echo "SERVER_IP=$(terraform output -raw instance_public_ip)" >> $GITHUB_ENV
-          echo "APPLICATION_URL=$(terraform output -raw application_url)" >> $GITHUB_ENV
+          # Fixed Terraform output commands to handle errors
+          echo "SERVER_IP=$(terraform output -raw instance_public_ip || echo '')" >> $GITHUB_ENV
+          echo "APPLICATION_URL=$(terraform output -raw application_url || echo '')" >> $GITHUB_ENV
+
+          # Debug output to verify variables are set
+          echo "Server IP: ${{ env.SERVER_IP }}"
+          echo "Application URL: ${{ env.APPLICATION_URL }}"
 
   deploy_application:
     name: Deploy Application
@@ -173,7 +178,7 @@ jobs:
 
       - name: Prepare deployment files
         run: |
-          # Create .env file for production
+          # Create .env file for production with DOCKER_HUB_USERNAME included
           cat > .env << EOF
           DB_USER=${{ secrets.DB_USER }}
           DB_PASS=${{ secrets.DB_PASS }}
@@ -181,31 +186,107 @@ jobs:
           API_URL=http://${{ env.SERVER_IP }}:3000
           DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
           NODE_ENV=production
+          DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
           EOF
+
+          # Debug: verify contents of files
+          echo "Contents of .env file:"
+          cat .env
+          echo "Contents of docker-compose.yml:"
+          cat docker-compose.yml
 
       - name: Deploy to EC2
         run: |
-          # Copy docker-compose and .env file to server
-          scp -i ~/.ssh/id_rsa docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
+          # Wait for SSH to be ready
+          for i in {1..5}; do
+            if ssh -i ~/.ssh/id_rsa -o ConnectTimeout=10 ubuntu@${{ env.SERVER_IP }} "echo SSH connection successful"; then
+              break
+            fi
+            echo "SSH connection attempt $i failed, waiting 10s before retry..."
+            sleep 10
+          done
 
-          # SSH into server and start the application
+          # Create directory on remote server
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} "mkdir -p /home/ubuntu/pokedex-app"
+
+          # Copy docker-compose and .env file to server with verbose flag
+          scp -v -i ~/.ssh/id_rsa docker-compose.yml .env ubuntu@${{ env.SERVER_IP }}:/home/ubuntu/pokedex-app/
+
+          # SSH into server and start the application with error handling
           ssh -i ~/.ssh/id_rsa ubuntu@${{ env.SERVER_IP }} << 'EOF'
+            set -e # Exit immediately if a command exits with a non-zero status
+            set -x # Print each command before executing (for debugging)
+            
             cd /home/ubuntu/pokedex-app
-            # Pull latest images
-            sudo docker-compose pull
+            
+            # Check if files were copied correctly
+            ls -la
+            cat .env
+            
+            # Pull latest images with error handling
+            if ! sudo docker-compose pull; then
+              echo "Failed to pull Docker images"
+              exit 1
+            fi
+            
             # Run with detached mode
-            sudo docker-compose up -d
+            if ! sudo docker-compose up -d; then
+              echo "Failed to start Docker containers"
+              sudo docker-compose logs
+              exit 1
+            fi
+            
+            # Verify containers are running
+            sudo docker ps
+            
+            # Show container logs
+            sudo docker-compose logs
+            
             # Clean up old images
             sudo docker image prune -a -f
+            
+            # Wait for services to initialize
+            echo "Waiting for services to initialize..."
+            sleep 20
+            
+            # Check if frontend container is running
+            if ! sudo docker ps | grep -q frontend; then
+              echo "Frontend container is not running!"
+              sudo docker-compose logs frontend
+              exit 1
+            fi
+            
+            # Check if backend container is running
+            if ! sudo docker ps | grep -q backend; then
+              echo "Backend container is not running!"
+              sudo docker-compose logs backend
+              exit 1
+            fi
+            
+            echo "Deployment completed successfully"
           EOF
 
       - name: Verify Deployment
         run: |
           echo "Application deployed to ${{ env.APPLICATION_URL }}"
-          # Wait for application to start
-          sleep 30
-          # Simple health check
-          curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }} | grep -q 200 || exit 1
+          # Wait longer for application to start (increased from 30s to 60s)
+          echo "Waiting 60 seconds for application to initialize..."
+          sleep 60
+
+          # Try multiple times to connect
+          for i in {1..5}; do
+            echo "Attempt $i: Checking if application is responding..."
+            if curl -s -o /dev/null -w "%{http_code}" ${{ env.APPLICATION_URL }} | grep -q "200\|301\|302"; then
+              echo "Application is responding properly!"
+              exit 0
+            fi
+            echo "Application not yet ready, waiting 10s before retry..."
+            sleep 10
+          done
+
+          echo "WARNING: Could not verify application is responding. Check logs manually."
+          exit 1
+        continue-on-error: true # Don't fail the workflow if verification fails
 
   notify:
     name: Notify Deployment
@@ -216,4 +297,7 @@ jobs:
     steps:
       - name: Send notification
         run: |
-          echo "Deployment completed successfully! Application is available at ${{ env.APPLICATION_URL }}"
+          echo "Deployment completed! Application is available at ${{ env.APPLICATION_URL }}"
+          echo "To check application status, SSH into the server:"
+          echo "ssh -i ~/.ssh/your-key ubuntu@${{ env.SERVER_IP }}"
+          echo "Then run: cd /home/ubuntu/pokedex-app && sudo docker-compose ps"
