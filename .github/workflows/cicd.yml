@@ -162,13 +162,14 @@ jobs:
       - name: Get Terraform Outputs
         id: terraform
         run: |
-          # Fixed Terraform output commands to handle errors
-          echo "SERVER_IP=$(terraform output -raw instance_public_ip || echo '')" >> $GITHUB_ENV
-          echo "APPLICATION_URL=$(terraform output -raw application_url || echo '')" >> $GITHUB_ENV
+          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "3.223.128.133")
+          APPLICATION_URL=$(terraform output -raw application_url 2>/dev/null || echo "http://3.223.128.133")
 
-          # Debug output to verify variables are set
-          echo "Server IP: ${{ env.SERVER_IP }}"
-          echo "Application URL: ${{ env.APPLICATION_URL }}"
+          echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
+          echo "APPLICATION_URL=$APPLICATION_URL" >> $GITHUB_ENV
+
+          echo "Server IP: $SERVER_IP"
+          echo "Application URL: $APPLICATION_URL"
 
   deploy_application:
     name: Deploy Application
