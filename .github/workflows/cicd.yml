@@ -90,8 +90,12 @@ jobs:
           context: ./frontend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache,mode=max
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache,mode=max
 
       - name: Build and push backend image
         uses: docker/build-push-action@v4
@@ -99,8 +103,12 @@ jobs:
           context: ./backend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache,mode=max
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache,mode=max
 
   # 3. Provision Infrastructure with Terraform
   provision-infrastructure:
@@ -199,11 +207,11 @@ jobs:
         id: extract-ip
         run: |
           cd ${{ steps.find-terraform.outputs.terraform_dir }}
-          
+
           # Try to get IP from terraform output command
           echo "Trying to get IP from terraform output..."
           IP_ADDRESS=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
-          
+
           # If not found in terraform output, try parsing the apply output
           if [ -z "$IP_ADDRESS" ]; then
             echo "Searching for IP in terraform_apply_output.txt..."
@@ -268,7 +276,7 @@ jobs:
           count=0
           max_attempts=15  # Increased max attempts
           echo "Waiting for SSH service to become available..."
-          
+
           # Test SSH connection with timeout
           until timeout 15s ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
           do
@@ -293,10 +301,10 @@ jobs:
           # Find the existing files
           DOCKER_COMPOSE_PATH=$(find . -name "docker-compose.yml" | head -1)
           NGINX_CONF_PATH=$(find . -name "nginx.conf" | head -1)
-          
+
           echo "Found docker-compose.yml at: $DOCKER_COMPOSE_PATH"
           echo "Found nginx.conf at: $NGINX_CONF_PATH"
-          
+
           # Copy docker-compose file
           if [ -f "$DOCKER_COMPOSE_PATH" ]; then
             scp -i ~/.ssh/id_rsa "$DOCKER_COMPOSE_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
@@ -304,7 +312,7 @@ jobs:
             echo "Error: docker-compose.yml file not found"
             exit 1
           fi
-          
+
           # Copy nginx.conf file
           if [ -f "$NGINX_CONF_PATH" ]; then
             scp -i ~/.ssh/id_rsa "$NGINX_CONF_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
@@ -314,15 +322,18 @@ jobs:
           fi
 
           # Create .env file with secrets
-          cat > .env << 'EOF'
-DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
-DB_USER=${{ secrets.DB_USER }}
-DB_PASS=${{ secrets.DB_PASS }}
-DB_NAME=${{ secrets.DB_NAME }}
-DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
-API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
-NODE_ENV=production
-EOF
+          - name: Prepare deployment files
+          run: |
+            # Create .env file for production
+            cat > .env << EOF
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASS=${{ secrets.DB_PASS }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            API_URL=http://${{ env.SERVER_IP }}:3000
+            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+            NODE_ENV=production
+            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+            EOF
 
           # Copy .env file to server
           scp -i ~/.ssh/id_rsa .env ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
@@ -391,7 +402,9 @@ EOF
         id: backend-health
         uses: jtalk/url-health-check-action@v3
         with:
-          url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000/admin/
+          url:
+            http://${{ needs.provision-infrastructure.outputs.instance_ip
+            }}:3000/admin/
           max-attempts: 8
           retry-delay: 20s
           follow-redirect: true
@@ -431,7 +444,9 @@ EOF
           echo "Deployment completed successfully!"
           echo "Application URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}"
           echo "Backend API URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000"
-        if: steps.frontend-health.outcome == 'success' || steps.backend-health.outcome == 'success'
+        if:
+          steps.frontend-health.outcome == 'success' ||
+          steps.backend-health.outcome == 'success'
 
       - name: Deployment failure notification
         run: |
@@ -439,4 +454,6 @@ EOF
           echo "Deployment health checks failed!"
           echo "Please check the logs for more information."
           exit 1
-        if: steps.frontend-health.outcome != 'success' && steps.backend-health.outcome != 'success'
+        if:
+          steps.frontend-health.outcome != 'success' &&
+          steps.backend-health.outcome != 'success'
