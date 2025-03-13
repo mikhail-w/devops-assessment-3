@@ -173,27 +173,41 @@ jobs:
       - name: Terraform Apply
         id: terraform_apply
         run: |
-          # Apply terraform configuration
+          # Apply terraform without capturing output directly
           terraform apply -auto-approve
 
-          # Get the server IP directly using terraform output command
-          # This avoids the env command issue
-          SERVER_IP=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
+          # Extract IP from terraform show output
+          TERRAFORM_SHOW=$(terraform show -json)
+          echo "Terraform show output captured"
 
-          # If Terraform output failed, fall back to AWS CLI
-          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "None" ]; then
-            echo "Could not get IP from Terraform output, falling back to AWS CLI"
-            # Get IP address from AWS CLI
-            SERVER_IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          # Parse the server IP from the output using grep and sed
+          # This approach completely avoids using terraform output command
+          SERVER_IP=$(echo "$TERRAFORM_SHOW" | grep -o '"instance_public_ip":[[:space:]]*"[^"]*"' | sed 's/"instance_public_ip":[[:space:]]*"\([^"]*\)"/\1/')
+
+          # If we couldn't get the IP, fall back to AWS CLI
+          if [ -z "$SERVER_IP" ]; then
+            echo "Falling back to AWS CLI for instance IP"
+            SERVER_IP=$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=pokedex-app" "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].PublicIpAddress" \
+              --output text)
           fi
 
-          # Set GitHub environment variables for later steps
-          # This is different from creating a .env file for the application
+          # If still no IP, use a fallback approach
+          if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" == "None" ]; then
+            echo "No IP found, checking AWS CLI for any running instance"
+            SERVER_IP=$(aws ec2 describe-instances \
+              --filters "Name=instance-state-name,Values=running" \
+              --query "Reservations[0].Instances[0].PublicIpAddress" \
+              --output text)
+          fi
+
+          # Simple console output of the server IP
+          echo "Server IP is: $SERVER_IP"
+
+          # Set for future steps using GitHub's environment file
           echo "SERVER_IP=$SERVER_IP" >> $GITHUB_ENV
           echo "APPLICATION_URL=http://$SERVER_IP" >> $GITHUB_ENV
-
-          # Print for debugging
-          echo "Using server IP: $SERVER_IP"
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
