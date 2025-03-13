@@ -1,4 +1,4 @@
-name: Pokedex CI/CD Pipeline
+name: Minimalist CI/CD Pipeline
 
 on:
   push:
@@ -6,8 +6,8 @@ on:
   workflow_dispatch:
 
 env:
-  FRONTEND_IMAGE_NAME: pokedex-frontend
-  BACKEND_IMAGE_NAME: pokedex-backend
+  FRONTEND_IMAGE: frontend
+  BACKEND_IMAGE: backend
   DOCKER_REGISTRY: docker.io
   AWS_REGION: us-east-1
 
@@ -19,24 +19,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up Node.js
+      # Frontend Tests
+      - name: Setup Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
-          cache: 'npm'
 
       - name: Install frontend dependencies
         run: |
           cd frontend
           npm ci
 
-      - name: Run frontend linting
+      - name: Run frontend tests
         run: |
           cd frontend
-          npm run lint
-        continue-on-error: true
+          npm test
 
-      - name: Set up Python
+      # Backend Tests
+      - name: Setup Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
@@ -49,25 +49,15 @@ jobs:
       - name: Run backend tests
         run: |
           cd backend
-          python manage.py test
-        env:
-          DEBUG: 'True'
-          DB_HOST: 'localhost'
-          DB_NAME: 'test_db'
-          DB_USER: 'postgres'
-          DB_PASS: 'postgres'
-          SECRET_KEY: 'test-key-for-ci'
+          python -m pytest
 
   build:
-    name: Build Docker Images
-    runs-on: ubuntu-latest
+    name: Build Images
     needs: test
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
 
       - name: Login to DockerHub
         uses: docker/login-action@v2
@@ -75,22 +65,24 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Build and push frontend image
+      - name: Build and push frontend
         uses: docker/build-push-action@v4
         with:
           context: ./frontend
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+          tags:
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.FRONTEND_IMAGE }}:latest
 
-      - name: Build and push backend image
+      - name: Build and push backend
         uses: docker/build-push-action@v4
         with:
           context: ./backend
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+          tags:
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.BACKEND_IMAGE }}:latest
 
-  provision-infrastructure:
-    name: Provision Infrastructure
+  deploy:
+    name: Deploy Application
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -104,65 +96,46 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Terraform
+      - name: Deploy EC2 instance with Terraform
         uses: hashicorp/setup-terraform@v2
         with:
-          terraform_version: 1.5.7
+          terraform_version: '1.5.7'
 
-      - name: Terraform Init
-        run: terraform init
+      - name: Terraform Init and Apply
+        run: |
+          terraform init
+          terraform apply -auto-approve
 
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
+      - name: Get EC2 Public IP
+        id: get-ip
+        run: |
+          IP=$(terraform output -raw instance_public_ip)
+          echo "instance_ip=$IP" >> $GITHUB_OUTPUT
 
-  deploy-application:
-    name: Deploy Application
-    needs: provision-infrastructure
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up SSH
+      - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
-
-      - name: Copy files to server
-        run: |
-          scp -i ~/.ssh/id_rsa docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
-          scp -i ~/.ssh/id_rsa nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          ssh-keyscan -H ${{ steps.get-ip.outputs.instance_ip }} >> ~/.ssh/known_hosts
 
       - name: Deploy with Docker Compose
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} << 'EOF'
-          cd ~/pokedex-app
-          docker-compose up -d --build
-          docker image prune -af
-          docker-compose ps
-          EOF
+          scp -i ~/.ssh/id_rsa docker-compose.yml ubuntu@${{ steps.get-ip.outputs.instance_ip }}:~/
+          scp -i ~/.ssh/id_rsa .env ubuntu@${{ steps.get-ip.outputs.instance_ip }}:~/
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ steps.get-ip.outputs.instance_ip }} '
+            docker-compose pull
+            docker-compose up -d
+          '
 
   health-check:
-    name: Health Check and Monitoring
-    needs: [provision-infrastructure, deploy-application]
+    name: Health Check
+    needs: deploy
     runs-on: ubuntu-latest
     steps:
-      - name: Check frontend availability
+      - name: Check frontend status
         uses: jtalk/url-health-check-action@v3
         with:
-          url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}
-          max-attempts: 5
-          retry-delay: 15s
-        continue-on-error: true
-
-      - name: Check backend API availability
-        uses: jtalk/url-health-check-action@v3
-        with:
-          url:
-            http://${{ needs.provision-infrastructure.outputs.instance_ip
-            }}:3000/admin/
-          max-attempts: 5
-          retry-delay: 15s
-        continue-on-error: true
+          url: http://${{ needs.deploy.outputs.instance_ip }}
+          max-attempts: 3
+          retry-delay: 5s
