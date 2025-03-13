@@ -142,29 +142,25 @@ jobs:
 
       - name: Terraform Init
         run: terraform init
-        working-directory: ./terraform
 
       - name: Terraform Plan
         run: terraform plan -out=tfplan
-        working-directory: ./terraform
         env:
           TF_VAR_instance_type: t2.micro
           TF_VAR_app_name: pokedex-app
 
       - name: Terraform Apply
         run: terraform apply -auto-approve tfplan
-        working-directory: ./terraform
 
       - name: Get Terraform Outputs
         id: terraform-output
         run: |
           echo "instance_public_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
-        working-directory: ./terraform
 
-      - name: Wait for instance to be ready
-        run: |
-          echo "Waiting for instance to be ready..."
-          sleep 60
+            - name: Wait for instance to be ready
+              run: |
+                echo "Waiting for instance to be ready..."
+                sleep 60
 
   # 4. Deploy Application
   deploy-application:
