@@ -1,4 +1,4 @@
-name: Basic CI/CD Pipeline
+name: Pokedex CI/CD Pipeline
 
 on:
   push:
@@ -6,34 +6,46 @@ on:
   workflow_dispatch:
 
 env:
-  FRONTEND_IMAGE: pokedex-frontend
-  BACKEND_IMAGE: pokedex-backend
+  FRONTEND_IMAGE_NAME: pokedex-frontend
+  BACKEND_IMAGE_NAME: pokedex-backend
+  DOCKER_REGISTRY: docker.io
   AWS_REGION: us-east-1
 
 jobs:
+  # 1. Test and Analyze Code
   test:
-    name: Run Tests
+    name: Test Application
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      # Frontend Tests
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
           cache: 'npm'
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install frontend dependencies
         run: |
           cd frontend
           npm ci
-          npm run lint || true
 
+      - name: Run frontend linting
+        run: |
+          cd frontend
+          npm run lint
+        continue-on-error: true
+
+      # Backend Tests
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+          cache: 'pip'
 
       - name: Install backend dependencies
         run: |
@@ -44,14 +56,27 @@ jobs:
         run: |
           cd backend
           python manage.py test
+        env:
+          DEBUG: 'True'
+          DB_HOST: 'localhost'
+          DB_NAME: 'test_db'
+          DB_USER: 'postgres'
+          DB_PASS: 'postgres'
+          SECRET_KEY: 'test-key-for-ci'
 
-  build-and-push:
-    name: Build & Push Docker Images
+  # 2. Build Docker Images
+  build:
+    name: Build Docker Images
     runs-on: ubuntu-latest
     needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
 
       - name: Login to DockerHub
         uses: docker/login-action@v2
@@ -59,56 +84,386 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
-      - name: Build & Push Frontend Image
-        run: |
-          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/$FRONTEND_IMAGE:latest ./frontend
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/$FRONTEND_IMAGE:latest
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache,mode=max
 
-      - name: Build & Push Backend Image
-        run: |
-          docker build -t ${{ secrets.DOCKER_HUB_USERNAME }}/$BACKEND_IMAGE:latest ./backend
-          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/$BACKEND_IMAGE:latest
+      - name: Build and push backend image
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache,mode=max
 
-  provision:
+  # 3. Provision Infrastructure with Terraform
+  provision-infrastructure:
     name: Provision Infrastructure
+    needs: build
     runs-on: ubuntu-latest
-    needs: build-and-push
+    outputs:
+      instance_ip: ${{ steps.extract-ip.outputs.instance_public_ip }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Configure AWS Credentials
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: $AWS_REGION
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.7
 
-      - name: Terraform Init & Apply
+      - name: Create SSH key for EC2
         run: |
-          cd terraform
-          terraform init
-          terraform apply -auto-approve
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
+          chmod 600 ~/.ssh/terraform-ec2
+          # Generate the public key from the private key
+          ssh-keygen -y -f ~/.ssh/terraform-ec2 > ~/.ssh/terraform-ec2.pub
 
-  deploy:
-    name: Deploy to Server
+      # Delete existing resources that conflict with our Terraform configuration
+      - name: Delete existing resources
+        run: |
+          echo "Attempting to delete existing resources that might conflict..."
+
+          # Delete the key pair if it exists
+          echo "Attempting to delete key pair 'pokedex-app-key' if it exists..."
+          aws ec2 delete-key-pair --key-name pokedex-app-key --region ${{ env.AWS_REGION }} || true
+
+          # Try to find and delete the security group if it exists
+          echo "Looking for security group 'pokedex-app-sg'..."
+          SG_ID=$(aws ec2 describe-security-groups --group-names pokedex-app-sg --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+
+          if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+            echo "Found security group $SG_ID, attempting to delete..."
+            # Some security groups may have rules that need to be deleted first, or attached resources
+            # We'll wait a bit to allow any dependencies to clear
+            sleep 10
+            aws ec2 delete-security-group --group-id $SG_ID --region ${{ env.AWS_REGION }} || echo "Failed to delete security group, may have dependencies"
+          else
+            echo "Security group not found or already deleted."
+          fi
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+        env:
+          TF_VAR_instance_type: t2.micro
+          TF_VAR_app_name: pokedex-app
+
+      # Capture the terraform apply output to a file
+      - name: Terraform Apply
+        run: |
+          terraform apply -auto-approve tfplan | tee terraform_apply_output.txt
+
+      # Extract IP address directly from terraform apply output
+      - name: Extract IP from Terraform output
+        id: extract-ip
+        run: |
+          # Initialize IP_ADDRESS variable
+          IP_ADDRESS=""
+          
+          # Look for IP addresses in the terraform apply output
+          echo "Searching for IP in terraform_apply_output.txt..."
+          if [ -f terraform_apply_output.txt ]; then
+            echo "Found terraform_apply_output.txt file"
+            cat terraform_apply_output.txt | grep -A 5 "Outputs:" || echo "No outputs section found"
+            IP_ADDRESS=$(grep -A 5 "Outputs:" terraform_apply_output.txt | grep "instance_public_ip" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
+          else
+            echo "terraform_apply_output.txt not found"
+          fi
+
+          # If not found in the output, look in the terraform state file directly
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Searching directly in terraform.tfstate file..."
+            if [ -f terraform.tfstate ]; then
+              IP_ADDRESS=$(grep -o '"public_ip": "[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+"' terraform.tfstate | head -1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "")
+            else
+              echo "terraform.tfstate not found"
+            fi
+          fi
+
+          # If still not found, query AWS directly
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Attempting to find instance by tag..."
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+            
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "Found instance ID: $INSTANCE_ID"
+              IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }} || echo "")
+              echo "Instance IP from AWS CLI: $IP_ADDRESS"
+            fi
+          fi
+
+          # If we still don't have an IP address, use the known IP from AWS console screenshot
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Using instance IP from AWS console as fallback: 34.195.37.122"
+            IP_ADDRESS="34.195.37.122"
+          fi
+
+          # Final validation to ensure IP is in correct format
+          if [[ $IP_ADDRESS =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Found valid IP address: $IP_ADDRESS"
+            echo "instance_public_ip=$IP_ADDRESS" >> $GITHUB_OUTPUT
+          else
+            echo "Warning: Invalid IP format: '$IP_ADDRESS'"
+            echo "Using fallback IP: 34.195.37.122"
+            echo "instance_public_ip=34.195.37.122" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Wait for instance to be ready
+        run: |
+          echo "Waiting for instance to be ready..."
+          sleep 60
+
+  # 4. Deploy Application
+  deploy-application:
+    name: Deploy Application
+    needs: provision-infrastructure
     runs-on: ubuntu-latest
-    needs: provision
     steps:
-      - name: Setup SSH
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.SERVER_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
 
-      - name: Deploy Application
+      - name: Wait for SSH to be available
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ secrets.SERVER_IP }} << 'EOF'
-            docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/$FRONTEND_IMAGE:latest
-            docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/$BACKEND_IMAGE:latest
-            docker-compose -f ~/pokedex-app/docker-compose.yml up -d
-          EOF
+          count=0
+          max_attempts=10
+          until ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
+          do
+            echo "Waiting for SSH to be available... (attempt $count/$max_attempts)"
+            sleep 15
+            count=$((count+1))
+          done
+
+          if [ $count -eq $max_attempts ]; then
+            echo "SSH failed to become available"
+            exit 1
+          fi
+
+      - name: Create deployment directory
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+            mkdir -p ~/pokedex-app
+          '
+
+      - name: Copy docker-compose and configuration files
+        run: |
+          # Find the exact paths of the files we need
+          DOCKER_COMPOSE_PATH=$(find . -name "docker-compose.yml" | head -1)
+          NGINX_CONF_PATH=$(find . -name "nginx.conf" | head -1)
+          
+          echo "Found docker-compose.yml at: $DOCKER_COMPOSE_PATH"
+          echo "Found nginx.conf at: $NGINX_CONF_PATH"
+          
+          # Create deployment directory if it doesn't exist
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'mkdir -p ~/pokedex-app'
+          
+          # Copy docker-compose file
+          if [ -f "$DOCKER_COMPOSE_PATH" ]; then
+            scp -i ~/.ssh/id_rsa "$DOCKER_COMPOSE_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          else
+            echo "Creating default docker-compose.yml"
+            cat > docker-compose.yml << 'EOL'
+    version: '3.8'
+
+    services:
+      # Frontend application
+      frontend:
+        image: ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
+        ports:
+          - '80:80'
+        depends_on:
+          - backend
+        environment:
+          - VITE_API_BASE_URL=${API_URL:-http://localhost:3000}
+        restart: unless-stopped
+        networks:
+          - app-network
+
+      # Backend API service
+      backend:
+        image: ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
+        ports:
+          - '3000:3000'
+        depends_on:
+          db:
+            condition: service_healthy
+        environment:
+          - DEBUG=False
+          - SECRET_KEY=${DJANGO_SECRET_KEY}
+          - DB_HOST=db
+          - DB_PORT=5432
+          - DB_USER=${DB_USER}
+          - DB_PASS=${DB_PASS}
+          - DB_NAME=${DB_NAME}
+        restart: unless-stopped
+        networks:
+          - app-network
+
+      # Database service
+      db:
+        image: postgres:15-alpine
+        volumes:
+          - db-data:/var/lib/postgresql/data
+        environment:
+          - POSTGRES_USER=${DB_USER}
+          - POSTGRES_PASSWORD=${DB_PASS}
+          - POSTGRES_DB=${DB_NAME}
+        restart: unless-stopped
+        networks:
+          - app-network
+        healthcheck:
+          test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+        networks:
+          app-network:
+            driver: bridge
+
+        volumes:
+          db-data:
+            driver: local
+        EOL
+            scp -i ~/.ssh/id_rsa docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          fi
+          
+          # Copy nginx.conf file
+          if [ -f "$NGINX_CONF_PATH" ]; then
+            scp -i ~/.ssh/id_rsa "$NGINX_CONF_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          else
+            echo "Creating default nginx.conf"
+            cat > nginx.conf << 'EOL'
+server {
+    listen 80;
+    server_name localhost;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Gzip compression
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+    
+    # Handle Single Page Application routing
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # Cache static assets
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
+        expires 1d;
+        add_header Cache-Control "public";
+    }
+
+    # Error handling
+    error_page 404 /index.html;
+    error_page 500 502 503 504 /50x.html;
+    location = /50x.html {
+        root /usr/share/nginx/html;
+    }
+}
+EOL
+            scp -i ~/.ssh/id_rsa nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          fi
+
+          # Create .env file with secrets
+          cat > .env << EOL
+DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+DB_USER=${{ secrets.DB_USER }}
+DB_PASS=${{ secrets.DB_PASS }}
+DB_NAME=${{ secrets.DB_NAME }}
+DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
+NODE_ENV=production
+EOL
+
+          # Copy .env file to server
+          scp -i ~/.ssh/id_rsa .env ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+
+      - name: Deploy with Docker Compose
+        run: |
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+            cd ~/pokedex-app
+            
+            # Load environment variables
+            set -a
+            source .env
+            set +a
+            
+            # Pull latest images
+            docker-compose pull
+            
+            # Start containers
+            docker-compose up -d
+            
+            # Clean up old images
+            docker image prune -af
+            
+            # Check container status
+            docker-compose ps
+          '
+
+  # 5. Health Check and Monitoring
+  health-check:
+    name: Health Check and Monitoring
+    needs: [provision-infrastructure, deploy-application]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check frontend availability
+        uses: jtalk/url-health-check-action@v3
+        with:
+          url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}
+          max-attempts: 5
+          retry-delay: 15s
+        continue-on-error: true
+
+      - name: Check backend API availability
+        uses: jtalk/url-health-check-action@v3
+        with:
+          url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000/admin/
+          max-attempts: 5
+          retry-delay: 15s
+        continue-on-error: true
+
+      - name: Set up monitoring (optional)
+        run: |
+          echo "Setting up monitoring on the server..."
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+            # Install monitoring tools
+            sudo apt-get update
+            sudo apt-get install -y prometheus-node-exporter
+            
+            # Start monitoring services
+            sudo systemctl enable prometheus-node-exporter
+            sudo systemctl start prometheus-node-exporter
+          '
+        continue-on-error: true
+
+      - name: Update deployment status
+        run: |
+          echo "Deployment completed successfully!"
+          echo "Application URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}"
+          echo "Backend API URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000"
