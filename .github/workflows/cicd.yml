@@ -140,34 +140,28 @@ jobs:
           chmod 600 ~/.ssh/terraform-ec2
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/terraform-ec2.pub
 
-      # Check existing resources and set unique resource names if they already exist
-      - name: Check existing resources
-        id: check-resources
+      # Delete existing resources that conflict with our Terraform configuration
+      - name: Delete existing resources
         run: |
-          # Create timestamp for unique resource names
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
+          echo "Attempting to delete existing resources that might conflict..."
 
-          # Check if key pair exists
-          if aws ec2 describe-key-pairs --key-names pokedex-app-key --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            echo "Using unique key pair name"
-            echo "TF_VAR_key_name=pokedex-app-key-${TIMESTAMP}" >> $GITHUB_ENV
+          # Delete the key pair if it exists
+          echo "Attempting to delete key pair 'pokedex-app-key' if it exists..."
+          aws ec2 delete-key-pair --key-name pokedex-app-key --region ${{ env.AWS_REGION }} || true
+
+          # Try to find and delete the security group if it exists
+          echo "Looking for security group 'pokedex-app-sg'..."
+          SG_ID=$(aws ec2 describe-security-groups --group-names pokedex-app-sg --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
+
+          if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
+            echo "Found security group $SG_ID, attempting to delete..."
+            # Some security groups may have rules that need to be deleted first, or attached resources
+            # We'll wait a bit to allow any dependencies to clear
+            sleep 10
+            aws ec2 delete-security-group --group-id $SG_ID --region ${{ env.AWS_REGION }} || echo "Failed to delete security group, may have dependencies"
           else
-            echo "Using default key pair name"
-            echo "TF_VAR_key_name=pokedex-app-key" >> $GITHUB_ENV
+            echo "Security group not found or already deleted."
           fi
-
-          # Check if security group exists
-          if aws ec2 describe-security-groups --group-names pokedex-app-sg --region ${{ env.AWS_REGION }} 2>/dev/null; then
-            echo "Using unique security group name"
-            echo "TF_VAR_sg_name=pokedex-app-sg-${TIMESTAMP}" >> $GITHUB_ENV
-          else
-            echo "Using default security group name"
-            echo "TF_VAR_sg_name=pokedex-app-sg" >> $GITHUB_ENV
-          fi
-
-          # Output the determined resource names for debugging
-          echo "Key pair name: $TF_VAR_key_name"
-          echo "Security group name: $TF_VAR_sg_name"
 
       - name: Terraform Init
         run: terraform init
@@ -177,7 +171,6 @@ jobs:
         env:
           TF_VAR_instance_type: t2.micro
           TF_VAR_app_name: pokedex-app
-          # Terraform will use TF_VAR_key_name and TF_VAR_sg_name from environment
 
       - name: Terraform Apply
         run: terraform apply -auto-approve tfplan
