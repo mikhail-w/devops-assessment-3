@@ -289,8 +289,8 @@ jobs:
 
       - name: Prepare deployment files
         run: |
-          # Create .env file for production
-          cat > .env << EOF
+          # Create .env file for production with proper quoting
+          cat > .env << 'EOF'
           DB_USER=${{ secrets.DB_USER }}
           DB_PASS=${{ secrets.DB_PASS }}
           DB_NAME=${{ secrets.DB_NAME }}
