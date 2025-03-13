@@ -278,45 +278,27 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
             mkdir -p ~/pokedex-app
           '
-
       - name: Copy configuration files
         run: |
-          # Find the existing files
-          DOCKER_COMPOSE_PATH=$(find . -name "docker-compose.yml" | head -1)
-          NGINX_CONF_PATH=$(find . -name "nginx.conf" | head -1)
+          # Use explicit paths based on your repository structure
+          echo "Copying docker-compose.yml from repository root"
+          scp -i ~/.ssh/id_rsa ./docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
 
-          echo "Found docker-compose.yml at: $DOCKER_COMPOSE_PATH"
-          echo "Found nginx.conf at: $NGINX_CONF_PATH"
+          echo "Copying nginx.conf from frontend directory"
+          scp -i ~/.ssh/id_rsa ./frontend/nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
 
-          # Copy docker-compose file
-          if [ -f "$DOCKER_COMPOSE_PATH" ]; then
-            scp -i ~/.ssh/id_rsa "$DOCKER_COMPOSE_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
-          else
-            echo "Error: docker-compose.yml file not found"
-            exit 1
-          fi
-
-          # Copy nginx.conf file
-          if [ -f "$NGINX_CONF_PATH" ]; then
-            scp -i ~/.ssh/id_rsa "$NGINX_CONF_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
-          else
-            echo "Error: nginx.conf file not found."
-            exit 1
-          fi
-
-          # Create .env file with secrets
-          - name: Prepare deployment files
-          run: |
-            # Create .env file for production
-            cat > .env << EOF
-            DB_USER=${{ secrets.DB_USER }}
-            DB_PASS=${{ secrets.DB_PASS }}
-            DB_NAME=${{ secrets.DB_NAME }}
-            API_URL=http://${{ env.SERVER_IP }}:3000
-            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
-            NODE_ENV=production
-            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
-            EOF
+      - name: Prepare deployment files
+        run: |
+          # Create .env file for production
+          cat > .env << EOF
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASS=${{ secrets.DB_PASS }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
+          DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+          NODE_ENV=production
+          DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+          EOF
 
           # Copy .env file to server
           scp -i ~/.ssh/id_rsa .env ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
