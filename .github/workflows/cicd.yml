@@ -138,7 +138,8 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
-          echo "${{ secrets.SSH_PUBLIC_KEY }}" > ~/.ssh/terraform-ec2.pub
+          # Generate the public key from the private key
+          ssh-keygen -y -f ~/.ssh/terraform-ec2 > ~/.ssh/terraform-ec2.pub
 
       # Delete existing resources that conflict with our Terraform configuration
       - name: Delete existing resources
