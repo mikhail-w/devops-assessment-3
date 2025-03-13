@@ -116,7 +116,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     outputs:
-      instance_ip: ${{ steps.terraform-output.outputs.instance_public_ip }}
+      instance_ip: ${{ steps.extract-ip.outputs.instance_public_ip }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -172,13 +172,54 @@ jobs:
           TF_VAR_instance_type: t2.micro
           TF_VAR_app_name: pokedex-app
 
+      # Capture the terraform apply output to a file
       - name: Terraform Apply
-        run: terraform apply -auto-approve tfplan
-
-      - name: Get Terraform Outputs
-        id: terraform-output
         run: |
-          echo "instance_public_ip=$(terraform output -raw instance_public_ip)" >> $GITHUB_OUTPUT
+          terraform apply -auto-approve tfplan | tee terraform_apply_output.txt
+
+      # Extract IP address directly from terraform apply output
+      - name: Extract IP from Terraform output
+        id: extract-ip
+        run: |
+          # Look for IP addresses in the terraform apply output
+          IP_ADDRESS=$(grep -oE "instance_public_ip = \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"" terraform_apply_output.txt | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
+
+          # If not found in the output, look in the terraform state
+          if [ -z "$IP_ADDRESS" ]; then
+            IP_ADDRESS=$(grep -oE "\"public_ip\": \"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+\"" terraform.tfstate | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" | head -1 || echo "")
+          fi
+
+          # If still not found, query AWS directly
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Attempting to find instance by tag..."
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+            
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "Found instance ID: $INSTANCE_ID"
+              IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }} || echo "")
+              echo "Instance IP from AWS CLI: $IP_ADDRESS"
+            fi
+          fi
+
+          # If we still don't have an IP, list all running instances as a last resort
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Attempting to find any recently launched t2.micro instance..."
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=instance-state-name,Values=running" "Name=instance-type,Values=t2.micro" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} --sort-by launchTime || echo "")
+            
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              echo "Found instance ID: $INSTANCE_ID"
+              IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }} || echo "")
+              echo "Instance IP from AWS CLI: $IP_ADDRESS"
+            fi
+          fi
+
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Failed to find instance IP address"
+            exit 1
+          fi
+
+          echo "Found IP address: $IP_ADDRESS"
+          echo "instance_public_ip=$IP_ADDRESS" >> $GITHUB_OUTPUT
 
       - name: Wait for instance to be ready
         run: |
