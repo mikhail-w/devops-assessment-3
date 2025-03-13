@@ -13,63 +13,61 @@ env:
 
 jobs:
   # 1. Test and Analyze Code
-  test-and-analyze:
-    name: Test and Analyze Code
+  test:
+    name: Test Application
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
+      # Frontend Tests
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
           node-version: '18'
           cache: 'npm'
-
-      - name: Install backend dependencies
-        run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install pytest pytest-cov flake8
+          cache-dependency-path: '**/package-lock.json'
 
       - name: Install frontend dependencies
         run: |
+          cd frontend
           npm ci
-        working-directory: ./
 
-      - name: Lint backend code
+      - name: Run frontend linting
         run: |
-          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        continue-on-error: true
-
-      - name: Lint frontend code
-        run: |
+          cd frontend
           npm run lint
-        working-directory: ./
         continue-on-error: true
+
+      # Backend Tests
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
 
       - name: Run backend tests
         run: |
-          pytest --cov=./ --cov-report=xml
-        continue-on-error: true
-
-      - name: Run frontend tests
-        run: |
-          npm test -- --coverage
-        working-directory: ./
-        continue-on-error: true
+          cd backend
+          python manage.py test
+        env:
+          DEBUG: 'True'
+          DB_HOST: 'localhost'
+          DB_NAME: 'test_db'
+          DB_USER: 'postgres'
+          DB_PASS: 'postgres'
+          SECRET_KEY: 'test-key-for-ci'
 
   # 2. Build Docker Images
   build-images:
     name: Build and Push Docker Images
-    needs: test-and-analyze
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
