@@ -125,7 +125,18 @@ jobs:
         with:
           terraform_version: 1.5.7
 
-      - name: Create SSH key for EC2
+      - name: Find Terraform directory
+        id: find-terraform
+        run: |
+          TERRAFORM_DIR=$(find . -name "*.tf" -exec dirname {} \; | sort -u | head -1)
+          if [ -z "$TERRAFORM_DIR" ]; then
+            echo "No Terraform files found, using repository root"
+            TERRAFORM_DIR="."
+          fi
+          echo "terraform_dir=$TERRAFORM_DIR" >> $GITHUB_OUTPUT
+          echo "Found Terraform files in: $TERRAFORM_DIR"
+
+      - name: Setup SSH key for Terraform
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
@@ -133,34 +144,46 @@ jobs:
           # Generate the public key from the private key
           ssh-keygen -y -f ~/.ssh/terraform-ec2 > ~/.ssh/terraform-ec2.pub
 
-      # Delete existing resources that conflict with our Terraform configuration
-      - name: Delete existing resources
+      # Check for existing resources
+      - name: Check for existing resources
         run: |
-          echo "Attempting to delete existing resources that might conflict..."
+          echo "Checking for existing resources that might conflict..."
 
-          # Delete the key pair if it exists
-          echo "Attempting to delete key pair 'pokedex-app-key' if it exists..."
-          aws ec2 delete-key-pair --key-name pokedex-app-key --region ${{ env.AWS_REGION }} || true
-
-          # Try to find and delete the security group if it exists
-          echo "Looking for security group 'pokedex-app-sg'..."
-          SG_ID=$(aws ec2 describe-security-groups --group-names pokedex-app-sg --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
-
-          if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
-            echo "Found security group $SG_ID, attempting to delete..."
-            # Some security groups may have rules that need to be deleted first, or attached resources
-            # We'll wait a bit to allow any dependencies to clear
-            sleep 10
-            aws ec2 delete-security-group --group-id $SG_ID --region ${{ env.AWS_REGION }} || echo "Failed to delete security group, may have dependencies"
+          # Check if key pair exists before deleting
+          KEY_EXISTS=$(aws ec2 describe-key-pairs --key-names pokedex-app-key --query 'KeyPairs[0].KeyName' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "NOT_FOUND")
+          if [ "$KEY_EXISTS" != "NOT_FOUND" ]; then
+            echo "Found existing key pair 'pokedex-app-key', deleting..."
+            aws ec2 delete-key-pair --key-name pokedex-app-key --region ${{ env.AWS_REGION }}
           else
-            echo "Security group not found or already deleted."
+            echo "Key pair 'pokedex-app-key' not found."
+          fi
+
+          # Check for security group with better error handling
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=pokedex-app-sg" --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "NOT_FOUND")
+          if [ "$SG_ID" != "NOT_FOUND" ] && [ "$SG_ID" != "None" ]; then
+            echo "Found security group $SG_ID, checking for dependencies..."
+            
+            # Check for instances using this security group
+            INSTANCES=$(aws ec2 describe-instances --filters "Name=instance.group-id,Values=$SG_ID" --query 'Reservations[*].Instances[*].InstanceId' --output text --region ${{ env.AWS_REGION }})
+            if [ ! -z "$INSTANCES" ]; then
+              echo "Security group is attached to instances: $INSTANCES. Will not delete to avoid disruption."
+            else
+              echo "No instances using this security group, attempting to delete..."
+              aws ec2 delete-security-group --group-id $SG_ID --region ${{ env.AWS_REGION }} || echo "Failed to delete security group, may have dependencies"
+            fi
+          else
+            echo "Security group 'pokedex-app-sg' not found or already deleted."
           fi
 
       - name: Terraform Init
-        run: terraform init
+        run: |
+          cd ${{ steps.find-terraform.outputs.terraform_dir }}
+          terraform init
 
       - name: Terraform Plan
-        run: terraform plan -out=tfplan
+        run: |
+          cd ${{ steps.find-terraform.outputs.terraform_dir }}
+          terraform plan -out=tfplan
         env:
           TF_VAR_instance_type: t2.micro
           TF_VAR_app_name: pokedex-app
@@ -168,32 +191,32 @@ jobs:
       # Capture the terraform apply output to a file
       - name: Terraform Apply
         run: |
+          cd ${{ steps.find-terraform.outputs.terraform_dir }}
           terraform apply -auto-approve tfplan | tee terraform_apply_output.txt
 
-      # Extract IP address directly from terraform apply output
+      # Extract IP with improved error handling
       - name: Extract IP from Terraform output
         id: extract-ip
         run: |
-          # Initialize IP_ADDRESS variable
-          IP_ADDRESS=""
+          cd ${{ steps.find-terraform.outputs.terraform_dir }}
           
-          # Look for IP addresses in the terraform apply output
-          echo "Searching for IP in terraform_apply_output.txt..."
-          if [ -f terraform_apply_output.txt ]; then
-            echo "Found terraform_apply_output.txt file"
-            cat terraform_apply_output.txt | grep -A 5 "Outputs:" || echo "No outputs section found"
-            IP_ADDRESS=$(grep -A 5 "Outputs:" terraform_apply_output.txt | grep "instance_public_ip" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
-          else
-            echo "terraform_apply_output.txt not found"
+          # Try to get IP from terraform output command
+          echo "Trying to get IP from terraform output..."
+          IP_ADDRESS=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
+          
+          # If not found in terraform output, try parsing the apply output
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Searching for IP in terraform_apply_output.txt..."
+            if [ -f terraform_apply_output.txt ]; then
+              IP_ADDRESS=$(grep -A 5 "Outputs:" terraform_apply_output.txt | grep "instance_public_ip" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
+            fi
           fi
 
-          # If not found in the output, look in the terraform state file directly
+          # If still not found, look in the terraform state
           if [ -z "$IP_ADDRESS" ]; then
-            echo "Searching directly in terraform.tfstate file..."
+            echo "Searching in terraform.tfstate file..."
             if [ -f terraform.tfstate ]; then
               IP_ADDRESS=$(grep -o '"public_ip": "[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+"' terraform.tfstate | head -1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+' || echo "")
-            else
-              echo "terraform.tfstate not found"
             fi
           fi
 
@@ -209,26 +232,19 @@ jobs:
             fi
           fi
 
-          # If we still don't have an IP address, use the known IP from AWS console screenshot
-          if [ -z "$IP_ADDRESS" ]; then
-            echo "Using instance IP from AWS console as fallback: 34.195.37.122"
-            IP_ADDRESS="34.195.37.122"
-          fi
-
           # Final validation to ensure IP is in correct format
           if [[ $IP_ADDRESS =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Found valid IP address: $IP_ADDRESS"
             echo "instance_public_ip=$IP_ADDRESS" >> $GITHUB_OUTPUT
           else
-            echo "Warning: Invalid IP format: '$IP_ADDRESS'"
-            echo "Using fallback IP: 34.195.37.122"
-            echo "instance_public_ip=34.195.37.122" >> $GITHUB_OUTPUT
+            echo "Failed to obtain a valid IP address. Aborting deployment."
+            exit 1
           fi
 
-      - name: Wait for instance to be ready
+      - name: Wait for instance to be fully initialized
         run: |
-          echo "Waiting for instance to be ready..."
-          sleep 60
+          echo "Waiting for instance to be fully initialized..."
+          sleep 120  # Increased wait time for better instance initialization
 
   # 4. Deploy Application
   deploy-application:
@@ -239,7 +255,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Set up SSH
+      # Set up SSH connection
+      - name: Set up SSH connection
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
@@ -249,16 +266,19 @@ jobs:
       - name: Wait for SSH to be available
         run: |
           count=0
-          max_attempts=10
-          until ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
+          max_attempts=15  # Increased max attempts
+          echo "Waiting for SSH service to become available..."
+          
+          # Test SSH connection with timeout
+          until timeout 15s ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -o ConnectTimeout=5 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
           do
             echo "Waiting for SSH to be available... (attempt $count/$max_attempts)"
-            sleep 15
+            sleep 20  # Increased sleep time
             count=$((count+1))
           done
 
           if [ $count -eq $max_attempts ]; then
-            echo "SSH failed to become available"
+            echo "SSH failed to become available after multiple attempts"
             exit 1
           fi
 
@@ -268,129 +288,33 @@ jobs:
             mkdir -p ~/pokedex-app
           '
 
-      - name: Copy docker-compose and configuration files
+      - name: Copy configuration files
         run: |
-          # Find the exact paths of the files we need
+          # Find the existing files
           DOCKER_COMPOSE_PATH=$(find . -name "docker-compose.yml" | head -1)
           NGINX_CONF_PATH=$(find . -name "nginx.conf" | head -1)
           
           echo "Found docker-compose.yml at: $DOCKER_COMPOSE_PATH"
           echo "Found nginx.conf at: $NGINX_CONF_PATH"
           
-          # Create deployment directory if it doesn't exist
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'mkdir -p ~/pokedex-app'
-          
           # Copy docker-compose file
           if [ -f "$DOCKER_COMPOSE_PATH" ]; then
             scp -i ~/.ssh/id_rsa "$DOCKER_COMPOSE_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
           else
-            echo "Creating default docker-compose.yml"
-            cat > docker-compose.yml << 'EOL'
-    version: '3.8'
-
-    services:
-      # Frontend application
-      frontend:
-        image: ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
-        ports:
-          - '80:80'
-        depends_on:
-          - backend
-        environment:
-          - VITE_API_BASE_URL=${API_URL:-http://localhost:3000}
-        restart: unless-stopped
-        networks:
-          - app-network
-
-      # Backend API service
-      backend:
-        image: ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
-        ports:
-          - '3000:3000'
-        depends_on:
-          db:
-            condition: service_healthy
-        environment:
-          - DEBUG=False
-          - SECRET_KEY=${DJANGO_SECRET_KEY}
-          - DB_HOST=db
-          - DB_PORT=5432
-          - DB_USER=${DB_USER}
-          - DB_PASS=${DB_PASS}
-          - DB_NAME=${DB_NAME}
-        restart: unless-stopped
-        networks:
-          - app-network
-
-      # Database service
-      db:
-        image: postgres:15-alpine
-        volumes:
-          - db-data:/var/lib/postgresql/data
-        environment:
-          - POSTGRES_USER=${DB_USER}
-          - POSTGRES_PASSWORD=${DB_PASS}
-          - POSTGRES_DB=${DB_NAME}
-        restart: unless-stopped
-        networks:
-          - app-network
-        healthcheck:
-          test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
-          interval: 10s
-          timeout: 5s
-          retries: 5
-
-        networks:
-          app-network:
-            driver: bridge
-
-        volumes:
-          db-data:
-            driver: local
-        EOL
-            scp -i ~/.ssh/id_rsa docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+            echo "Error: docker-compose.yml file not found"
+            exit 1
           fi
           
           # Copy nginx.conf file
           if [ -f "$NGINX_CONF_PATH" ]; then
             scp -i ~/.ssh/id_rsa "$NGINX_CONF_PATH" ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
           else
-            echo "Creating default nginx.conf"
-            cat > nginx.conf << 'EOL'
-server {
-    listen 80;
-    server_name localhost;
-    root /usr/share/nginx/html;
-    index index.html;
-
-    # Gzip compression
-    gzip on;
-    gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
-    
-    # Handle Single Page Application routing
-    location / {
-        try_files $uri $uri/ /index.html;
-    }
-
-    # Cache static assets
-    location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
-        expires 1d;
-        add_header Cache-Control "public";
-    }
-
-    # Error handling
-    error_page 404 /index.html;
-    error_page 500 502 503 504 /50x.html;
-    location = /50x.html {
-        root /usr/share/nginx/html;
-    }
-}
-EOL
-            scp -i ~/.ssh/id_rsa nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+            echo "Error: nginx.conf file not found."
+            exit 1
           fi
 
           # Create .env file with secrets
-          cat > .env << EOL
+          cat > .env << 'EOF'
 DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
 DB_USER=${{ secrets.DB_USER }}
 DB_PASS=${{ secrets.DB_PASS }}
@@ -398,7 +322,7 @@ DB_NAME=${{ secrets.DB_NAME }}
 DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
 API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
 NODE_ENV=production
-EOL
+EOF
 
           # Copy .env file to server
           scp -i ~/.ssh/id_rsa .env ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
@@ -413,17 +337,39 @@ EOL
             source .env
             set +a
             
+            # Ensure Docker is installed
+            if ! command -v docker &> /dev/null; then
+              echo "Docker not found, installing..."
+              sudo apt-get update
+              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+              sudo apt-get update
+              sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+              sudo usermod -aG docker $USER
+              # Using sudo for this session since group membership won't take effect until next login
+              sudo docker --version
+            fi
+            
+            # Ensure Docker Compose is installed
+            if ! command -v docker-compose &> /dev/null; then
+              echo "Docker Compose not found, installing..."
+              sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              sudo chmod +x /usr/local/bin/docker-compose
+              sudo docker-compose --version
+            fi
+            
             # Pull latest images
-            docker-compose pull
+            sudo docker-compose pull
             
             # Start containers
-            docker-compose up -d
+            sudo docker-compose up -d
             
-            # Clean up old images
-            docker image prune -af
+            # Clean up old images (but keep recent ones)
+            sudo docker image prune -f --filter "until=24h"
             
             # Check container status
-            docker-compose ps
+            sudo docker-compose ps
           '
 
   # 5. Health Check and Monitoring
@@ -433,37 +379,64 @@ EOL
     runs-on: ubuntu-latest
     steps:
       - name: Check frontend availability
+        id: frontend-health
         uses: jtalk/url-health-check-action@v3
         with:
           url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}
-          max-attempts: 5
-          retry-delay: 15s
-        continue-on-error: true
+          max-attempts: 8
+          retry-delay: 20s
+          follow-redirect: true
 
       - name: Check backend API availability
+        id: backend-health
         uses: jtalk/url-health-check-action@v3
         with:
           url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000/admin/
-          max-attempts: 5
-          retry-delay: 15s
-        continue-on-error: true
+          max-attempts: 8
+          retry-delay: 20s
+          follow-redirect: true
 
-      - name: Set up monitoring (optional)
+      - name: Set up monitoring
         run: |
           echo "Setting up monitoring on the server..."
           ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
-            # Install monitoring tools
-            sudo apt-get update
-            sudo apt-get install -y prometheus-node-exporter
+            # Check if node exporter is installed
+            if ! command -v prometheus-node-exporter &> /dev/null; then
+              # Install monitoring tools
+              sudo apt-get update
+              sudo apt-get install -y prometheus-node-exporter
+              
+              # Start monitoring services
+              sudo systemctl enable prometheus-node-exporter
+              sudo systemctl start prometheus-node-exporter
+              
+              echo "Monitoring tools installed and started"
+            else
+              echo "Monitoring tools already installed"
+            fi
             
-            # Start monitoring services
-            sudo systemctl enable prometheus-node-exporter
-            sudo systemctl start prometheus-node-exporter
+            # Verify monitoring service is running
+            if systemctl is-active --quiet prometheus-node-exporter; then
+              echo "Monitoring service is running"
+            else
+              echo "Monitoring service is not running, attempting to start..."
+              sudo systemctl start prometheus-node-exporter
+            fi
           '
         continue-on-error: true
 
-      - name: Update deployment status
+      - name: Generate deployment report
         run: |
+          echo "::set-output name=deployment_success::true"
           echo "Deployment completed successfully!"
           echo "Application URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}"
           echo "Backend API URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000"
+        if: steps.frontend-health.outcome == 'success' || steps.backend-health.outcome == 'success'
+
+      - name: Deployment failure notification
+        run: |
+          echo "::set-output name=deployment_success::false"
+          echo "Deployment health checks failed!"
+          echo "Please check the logs for more information."
+          exit 1
+        if: steps.frontend-health.outcome != 'success' && steps.backend-health.outcome != 'success'
