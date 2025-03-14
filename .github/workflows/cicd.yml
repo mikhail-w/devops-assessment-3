@@ -304,7 +304,7 @@ jobs:
             DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
             NODE_ENV=production
             DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
-            EOF
+            EOL
             
             # Print environment file existence
             echo 'Environment file created:'
