@@ -237,6 +237,7 @@ jobs:
         run: |
           echo "Waiting for instance to be ready..."
           sleep 60
+
   # 4. Deploy Application
   deploy-application:
     name: Deploy Application
@@ -278,6 +279,7 @@ jobs:
           ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
             mkdir -p ~/pokedex-app
           '
+
       - name: Copy configuration files
         run: |
           # Use explicit paths based on your repository structure
@@ -287,56 +289,40 @@ jobs:
           echo "Copying nginx.conf from frontend directory"
           scp -i ~/.ssh/id_rsa ./frontend/nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
 
-      - name: Prepare deployment files
-        run: |
-          # Create .env file line by line
-          echo "DB_USER=${DB_USER}" > .env
-          echo "DB_PASS=${DB_PASS}" >> .env
-          echo "DB_NAME=${DB_NAME}" >> .env
-          echo "API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000" >> .env
-          echo "DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}" >> .env
-          echo "NODE_ENV=production" >> .env
-          echo "DOCKER_HUB_USERNAME=${DOCKER_HUB_USERNAME}" >> .env
-
-          # Copy .env file to server
-          scp -i ~/.ssh/id_rsa .env ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
-        env:
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASS: ${{ secrets.DB_PASS }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-          DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
-          DOCKER_HUB_USERNAME: ${{ secrets.DOCKER_HUB_USERNAME }}
-
+      # Modified deployment script to properly handle environment variables
       - name: Deploy with Docker Compose
         run: |
-          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+          ssh -i ~/.ssh/id_rsa ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} "
             cd ~/pokedex-app
             
-            # Load environment variables
-            set -a
-            source .env
-            set +a
+            # Create a clean .env file directly on the server
+            cat > .env << 'EOL'
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASS=${{ secrets.DB_PASS }}
+            DB_NAME=${{ secrets.DB_NAME }}
+            API_URL=http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
+            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
+            NODE_ENV=production
+            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+            EOL
             
             # Ensure Docker is installed
             if ! command -v docker &> /dev/null; then
-              echo "Docker not found, installing..."
+              echo 'Docker not found, installing...'
               sudo apt-get update
               sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
               curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+              sudo add-apt-repository \"deb [arch=amd64] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\"
               sudo apt-get update
               sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-              sudo usermod -aG docker $USER
-              # Using sudo for this session since group membership won't take effect until next login
-              sudo docker --version
+              sudo usermod -aG docker \$USER
             fi
             
             # Ensure Docker Compose is installed
             if ! command -v docker-compose &> /dev/null; then
-              echo "Docker Compose not found, installing..."
-              sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              echo 'Docker Compose not found, installing...'
+              sudo curl -L \"https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-\$(uname -s)-\$(uname -m)\" -o /usr/local/bin/docker-compose
               sudo chmod +x /usr/local/bin/docker-compose
-              sudo docker-compose --version
             fi
             
             # Pull latest images
@@ -346,11 +332,11 @@ jobs:
             sudo docker-compose up -d
             
             # Clean up old images (but keep recent ones)
-            sudo docker image prune -f --filter "until=24h"
+            sudo docker image prune -f --filter \"until=24h\"
             
             # Check container status
             sudo docker-compose ps
-          '
+          "
 
   # 5. Health Check and Monitoring
   health-check:
