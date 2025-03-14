@@ -296,7 +296,7 @@ jobs:
             cd ~/pokedex-app
             
             # Create a clean .env file directly on the server
-            cat > .env << 'EOL'
+            cat > .env << EOF
             DB_USER=${{ secrets.DB_USER }}
             DB_PASS=${{ secrets.DB_PASS }}
             DB_NAME=${{ secrets.DB_NAME }}
@@ -304,15 +304,11 @@ jobs:
             DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY }}
             NODE_ENV=production
             DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
-            EOL
+            EOF
             
-            # Print environment variables for debugging (masked sensitive data)
-            echo 'Environment variables set:'
-            echo 'DB_USER=***'
-            echo 'DB_NAME=***'
-            echo 'API_URL='http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000
-            echo 'NODE_ENV=production'
-            echo 'DOCKER_HUB_USERNAME=***'
+            # Print environment file existence
+            echo 'Environment file created:'
+            ls -la .env
             
             # Ensure Docker is installed and running
             if ! command -v docker &> /dev/null; then
