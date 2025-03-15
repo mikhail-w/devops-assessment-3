@@ -341,17 +341,17 @@ jobs:
           # Start ssh-agent in the background
           eval "$(ssh-agent -s)"
 
-          # Add SSH private key to ssh-agent
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+          # Create a properly formatted private key file
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/private_key
+          chmod 600 ~/.ssh/private_key
+
+          # Add the key file to ssh-agent
+          ssh-add ~/.ssh/private_key
 
           # Add host key to known hosts
-          mkdir -p ~/.ssh
           ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
-
-          # Test the connection with debugging
-          echo "Testing SSH connection with ssh-agent..."
-          ssh -v -o StrictHostKeyChecking=no ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH connection successful"' || echo "SSH connection failed, but continuing"
 
       - name: Wait for SSH to be available
         run: |
