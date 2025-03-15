@@ -125,8 +125,12 @@ jobs:
           context: ./frontend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache,mode=max
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-frontend:buildcache,mode=max
 
       - name: Build and push backend image
         uses: docker/build-push-action@v4
@@ -134,8 +138,12 @@ jobs:
           context: ./backend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
-          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache
-          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache,mode=max
+          cache-from:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache
+          cache-to:
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
+            }}/pokedex-backend:buildcache,mode=max
 
   # 3. Provision Infrastructure with Terraform
   provision-infrastructure:
@@ -234,14 +242,14 @@ jobs:
         run: |
           # Extract IP using AWS CLI
           INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
-          
+
           # Wait for instance to be fully initialized
           echo "Waiting for instance $INSTANCE_ID to be in running state..."
           aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
-          
+
           # First try to get the Elastic IP (more reliable)
           IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
-          
+
           # If Elastic IP not found, try to get regular public IP
           if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
             IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
@@ -293,17 +301,17 @@ jobs:
           # Get instance ID directly from AWS
           INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
           echo "Direct Instance ID: $INSTANCE_ID"
-          
+
           # First try to get Elastic IP
           IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
-          
+
           # If no Elastic IP, try to get public IP
           if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
             IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
           fi
-          
+
           echo "Direct IP Address: $IP_ADDRESS"
-          
+
           # Set as environment variables for later steps
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
           echo "INSTANCE_IP=$IP_ADDRESS" >> $GITHUB_ENV
@@ -318,7 +326,7 @@ jobs:
           # Use the IP from environment variable
           IP="${INSTANCE_IP}"
           echo "Using IP address: $IP"
-          
+
           if [ -z "$IP" ] || [ "$IP" == "None" ]; then
             echo "Error: Failed to determine instance IP address"
             exit 1
@@ -339,7 +347,7 @@ jobs:
           max_attempts=5
           attempt=1
           connected=false
-          
+
           while [ $attempt -le $max_attempts ] && [ "$connected" != "true" ]; do
             echo "SSH connection attempt $attempt of $max_attempts..."
             
@@ -352,7 +360,7 @@ jobs:
               attempt=$((attempt+1))
             fi
           done
-          
+
           if [ "$connected" != "true" ]; then
             echo "Failed to establish SSH connection after $max_attempts attempts."
             exit 1
@@ -362,10 +370,10 @@ jobs:
         run: |
           IP=$(cat ~/.ssh/instance_ip)
           echo "Waiting for system services to be fully ready..."
-          
+
           # Wait for cloud-init to complete
           ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP "cloud-init status --wait || echo 'cloud-init wait failed but continuing'"
-          
+
           # Additional wait to ensure Docker is properly initialized
           ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP "timeout 60 bash -c 'until docker info; do sleep 5; done' || echo 'Docker not ready, but continuing'"
 
@@ -409,7 +417,7 @@ jobs:
             
             # Print container status
             sudo docker-compose ps
-ENDSSH
+          ENDSSH
 
   # 5. Health Check and Monitoring
   health-check:
@@ -428,15 +436,15 @@ ENDSSH
         run: |
           # Get instance ID directly from AWS
           INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
-          
+
           # First try to get Elastic IP
           IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
-          
+
           # If no Elastic IP, try to get public IP
           if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
             IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
           fi
-          
+
           echo "Using IP address: $IP_ADDRESS"
           echo "INSTANCE_IP=$IP_ADDRESS" >> $GITHUB_ENV
 
@@ -520,10 +528,10 @@ ENDSSH
         run: |
           FRONTEND_STATUS="${{ steps.frontend-health.outcome }}"
           BACKEND_STATUS="${{ steps.backend-health.outcome }}"
-          
+
           echo "Frontend health check: $FRONTEND_STATUS"
           echo "Backend health check: $BACKEND_STATUS"
-          
+
           if [ "$FRONTEND_STATUS" == "success" ] || [ "$BACKEND_STATUS" == "success" ]; then
             echo "deployment_success=true" >> $GITHUB_OUTPUT
             echo "Deployment completed successfully!"
