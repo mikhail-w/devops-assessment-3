@@ -289,11 +289,20 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
-          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
 
-          # Test connection
+          # Get IP address directly from previous job output
+          IP="${{ needs.provision-infrastructure.outputs.instance_ip }}"
+          echo "Using IP address: $IP"
+
+          # Add IP address to /etc/hosts to avoid DNS issues
+          echo "$IP ec2-instance" | sudo tee -a /etc/hosts
+
+          # Add to known hosts using IP address directly
+          ssh-keyscan -H $IP >> ~/.ssh/known_hosts
+
+          # Test connection with verbose output and IP address
           echo "Testing SSH connection..."
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH connection test"' || echo "Initial test connection failed, will retry"
+          ssh -v -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$IP 'echo "SSH connection test"' || echo "Initial test connection failed, will retry"
 
       - name: Wait for SSH to be available
         run: |
