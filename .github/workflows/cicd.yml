@@ -212,7 +212,7 @@ jobs:
             sudo docker-compose ps
           ENDSSH
 
-  # 4. Health  Check
+  # 4. Health Check
   health-check:
     name: Health Check
     needs: deploy
