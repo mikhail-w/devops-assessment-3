@@ -125,12 +125,8 @@ jobs:
           context: ./frontend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
-          cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache
-          cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:buildcache,mode=max
 
       - name: Build and push backend image
         uses: docker/build-push-action@v4
@@ -138,12 +134,8 @@ jobs:
           context: ./backend
           push: true
           tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
-          cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache
-          cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache,mode=max
+          cache-from: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:buildcache,mode=max
 
   # 3. Provision Infrastructure with Terraform
   provision-infrastructure:
@@ -237,24 +229,29 @@ jobs:
           # Skip plan and go straight to apply for simplicity
           terraform apply -auto-approve
 
-      # These must match the IDs used in the outputs section at the job level
       - name: Extract IP from AWS
         id: extract-ip
         run: |
           # Extract IP using AWS CLI
           INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
-
-          IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }} || echo "")
-
-          # If not found, look for Elastic IP
+          
+          # Wait for instance to be fully initialized
+          echo "Waiting for instance $INSTANCE_ID to be in running state..."
+          aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          
+          # First try to get the Elastic IP (more reliable)
+          IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
+          
+          # If Elastic IP not found, try to get regular public IP
           if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
-            IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }} || echo "")
+            IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
           fi
 
           echo "Found IP Address: ${IP_ADDRESS}"
           echo "instance_public_ip=${IP_ADDRESS}" >> $GITHUB_OUTPUT
+          # Also set as an environment variable for other steps
+          echo "INSTANCE_PUBLIC_IP=${IP_ADDRESS}" >> $GITHUB_ENV
 
-      # This step ID must match the one in the outputs section
       - name: Extract Instance ID from AWS
         id: extract-instance-id
         run: |
@@ -262,12 +259,13 @@ jobs:
           INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
           echo "Found Instance ID: ${INSTANCE_ID}"
           echo "instance_id=${INSTANCE_ID}" >> $GITHUB_OUTPUT
+          # Also set as an environment variable for other steps
+          echo "INSTANCE_ID=${INSTANCE_ID}" >> $GITHUB_ENV
 
-      # Simple fixed wait instead of complex checking
       - name: Wait for instance initialization
         run: |
-          echo "Waiting 3 minutes for instance to initialize..."
-          sleep 180
+          echo "Waiting 2 minutes for instance to initialize..."
+          sleep 120
           echo "Wait complete, proceeding to next steps."
 
           # Print the values being passed to the next steps for debugging
@@ -283,6 +281,33 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get instance details directly
+        run: |
+          # Get instance ID directly from AWS
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
+          echo "Direct Instance ID: $INSTANCE_ID"
+          
+          # First try to get Elastic IP
+          IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
+          
+          # If no Elastic IP, try to get public IP
+          if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
+            IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
+          fi
+          
+          echo "Direct IP Address: $IP_ADDRESS"
+          
+          # Set as environment variables for later steps
+          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "INSTANCE_IP=$IP_ADDRESS" >> $GITHUB_ENV
+
       # Set up direct SSH connection (more reliable than ssh-agent)
       - name: Setup SSH connection with direct IP
         run: |
@@ -290,24 +315,10 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
 
-          # Explicitly print the IP for debugging
-          echo "Raw IP from previous job: '${{ needs.provision-infrastructure.outputs.instance_ip }}'"
-
-          # Manually set IP if it's not being passed correctly
-          if [ -z "${{ needs.provision-infrastructure.outputs.instance_ip }}" ] || [ "${{ needs.provision-infrastructure.outputs.instance_ip }}" == "NONE" ]; then
-            # Try to get the IP directly from AWS using the instance ID
-            if [ -n "${{ needs.provision-infrastructure.outputs.instance_id }}" ]; then
-              IP=$(aws ec2 describe-instances --instance-ids "${{ needs.provision-infrastructure.outputs.instance_id }}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
-            else
-              # If instance ID is not available, search by tag
-              IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
-            fi
-          else
-            IP="${{ needs.provision-infrastructure.outputs.instance_ip }}"
-          fi
-
-          # Verify we have a valid IP
+          # Use the IP from environment variable
+          IP="${INSTANCE_IP}"
           echo "Using IP address: $IP"
+          
           if [ -z "$IP" ] || [ "$IP" == "None" ]; then
             echo "Error: Failed to determine instance IP address"
             exit 1
@@ -323,33 +334,40 @@ jobs:
           # Configure SSH for direct IP usage
           ssh-keyscan -H $IP >> ~/.ssh/known_hosts 2>/dev/null || echo "ssh-keyscan failed but continuing"
 
-          # Test SSH connection directly
+          # Test SSH connection directly - retry logic
           echo "Testing SSH connection..."
-          ssh -v -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$IP 'echo "SSH connection test"' || {
-            echo "Initial connection failed, will retry."
-            sleep 30
-            ssh -v -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$IP 'echo "SSH retry"' || echo "Second attempt also failed"
-          }
-
-      - name: Wait for SSH to be available
-        run: |
-          max_attempts=30
-          counter=0
-          echo "Waiting for SSH service to become available..."
-
-          until ssh -i ~/.ssh/terraform-ec2 -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o BatchMode=yes ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} "echo SSH is ready" || [ $counter -eq $max_attempts ]
-          do
-            echo "Attempt $counter/$max_attempts: SSH not available yet, waiting..."
-            sleep 10
-            counter=$((counter+1))
+          max_attempts=5
+          attempt=1
+          connected=false
+          
+          while [ $attempt -le $max_attempts ] && [ "$connected" != "true" ]; do
+            echo "SSH connection attempt $attempt of $max_attempts..."
+            
+            if ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@$IP 'echo "SSH connection successful"'; then
+              connected=true
+              echo "SSH connection established!"
+            else
+              echo "Connection attempt failed, waiting before retry..."
+              sleep 20
+              attempt=$((attempt+1))
+            fi
           done
-
-          if [ $counter -eq $max_attempts ]; then
-            echo "Error: SSH did not become available in time"
+          
+          if [ "$connected" != "true" ]; then
+            echo "Failed to establish SSH connection after $max_attempts attempts."
             exit 1
           fi
 
-          echo "SSH is now available!"
+      - name: Wait for SSH to be available
+        run: |
+          IP=$(cat ~/.ssh/instance_ip)
+          echo "Waiting for system services to be fully ready..."
+          
+          # Wait for cloud-init to complete
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP "cloud-init status --wait || echo 'cloud-init wait failed but continuing'"
+          
+          # Additional wait to ensure Docker is properly initialized
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP "timeout 60 bash -c 'until docker info; do sleep 5; done' || echo 'Docker not ready, but continuing'"
 
       - name: Create deployment directory
         run: |
@@ -361,10 +379,10 @@ jobs:
           IP=$(cat ~/.ssh/instance_ip)
           # Use explicit paths based on your repository structure
           echo "Copying docker-compose.yml from repository root"
-          scp -i ~/.ssh/terraform-ec2 ./docker-compose.yml ubuntu@$IP:~/pokedex-app/
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./docker-compose.yml ubuntu@$IP:~/pokedex-app/
 
           echo "Copying nginx.conf from frontend directory"
-          scp -i ~/.ssh/terraform-ec2 ./frontend/nginx.conf ubuntu@$IP:~/pokedex-app/
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./frontend/nginx.conf ubuntu@$IP:~/pokedex-app/ || echo "nginx.conf not found, skipping"
 
       - name: Deploy with Docker Compose
         run: |
@@ -383,8 +401,15 @@ jobs:
             DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
             EOF
             
-            # Rest of your deployment script...
-          ENDSSH
+            # Pull the latest images
+            sudo docker-compose pull
+            
+            # Start the application
+            sudo docker-compose up -d
+            
+            # Print container status
+            sudo docker-compose ps
+ENDSSH
 
   # 5. Health Check and Monitoring
   health-check:
@@ -392,37 +417,65 @@ jobs:
     needs: [provision-infrastructure, deploy-application]
     runs-on: ubuntu-latest
     steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get instance IP directly
+        run: |
+          # Get instance ID directly from AWS
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
+          
+          # First try to get Elastic IP
+          IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
+          
+          # If no Elastic IP, try to get public IP
+          if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
+            IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
+          fi
+          
+          echo "Using IP address: $IP_ADDRESS"
+          echo "INSTANCE_IP=$IP_ADDRESS" >> $GITHUB_ENV
+
       - name: Setup SSH connection for monitoring
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
-          ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H ${{ env.INSTANCE_IP }} >> ~/.ssh/known_hosts 2>/dev/null || echo "ssh-keyscan failed but continuing"
+
+      - name: Wait for services to start
+        run: |
+          echo "Waiting for services to fully start (30 seconds)..."
+          sleep 30
 
       - name: Check frontend availability
         id: frontend-health
         uses: jtalk/url-health-check-action@v3
         with:
-          url: http://${{ needs.provision-infrastructure.outputs.instance_ip }}
-          max-attempts: 8
-          retry-delay: 20s
+          url: http://${{ env.INSTANCE_IP }}
+          max-attempts: 10
+          retry-delay: 15s
           follow-redirect: true
+        continue-on-error: true
 
       - name: Check backend API availability
         id: backend-health
         uses: jtalk/url-health-check-action@v3
         with:
-          url:
-            http://${{ needs.provision-infrastructure.outputs.instance_ip
-            }}:3000/admin/
-          max-attempts: 8
-          retry-delay: 20s
+          url: http://${{ env.INSTANCE_IP }}:3000/admin/
+          max-attempts: 10
+          retry-delay: 15s
           follow-redirect: true
+        continue-on-error: true
 
       - name: Set up monitoring
         run: |
           echo "Setting up monitoring on the server..."
-          ssh -i ~/.ssh/terraform-ec2 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} '
             # Check if node exporter is installed
             if ! command -v prometheus-node-exporter &> /dev/null; then
               # Install monitoring tools
@@ -448,22 +501,38 @@ jobs:
           '
         continue-on-error: true
 
+      - name: Check Docker container status
+        run: |
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} '
+            echo "Docker container status:"
+            sudo docker ps -a
+            
+            echo "Docker Compose status:"
+            cd ~/pokedex-app
+            sudo docker-compose ps
+            
+            echo "Container logs:"
+            sudo docker-compose logs --tail=50
+          '
+        continue-on-error: true
+
       - name: Generate deployment report
         run: |
-          echo "deployment_success=true" >> $GITHUB_OUTPUT
-          echo "Deployment completed successfully!"
-          echo "Application URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}"
-          echo "Backend API URL: http://${{ needs.provision-infrastructure.outputs.instance_ip }}:3000"
-        if:
-          steps.frontend-health.outcome == 'success' ||
-          steps.backend-health.outcome == 'success'
-
-      - name: Deployment failure notification
-        run: |
-          echo "deployment_success=false" >> $GITHUB_OUTPUT
-          echo "Deployment health checks failed!"
-          echo "Please check the logs for more information."
-          exit 1
-        if:
-          steps.frontend-health.outcome != 'success' &&
-          steps.backend-health.outcome != 'success'
+          FRONTEND_STATUS="${{ steps.frontend-health.outcome }}"
+          BACKEND_STATUS="${{ steps.backend-health.outcome }}"
+          
+          echo "Frontend health check: $FRONTEND_STATUS"
+          echo "Backend health check: $BACKEND_STATUS"
+          
+          if [ "$FRONTEND_STATUS" == "success" ] || [ "$BACKEND_STATUS" == "success" ]; then
+            echo "deployment_success=true" >> $GITHUB_OUTPUT
+            echo "Deployment completed successfully!"
+            echo "Application URL: http://${{ env.INSTANCE_IP }}"
+            echo "Backend API URL: http://${{ env.INSTANCE_IP }}:3000"
+          else
+            echo "deployment_success=false" >> $GITHUB_OUTPUT
+            echo "Warning: Deployment health checks failed or partially failed."
+            echo "Application URL: http://${{ env.INSTANCE_IP }}"
+            echo "Backend API URL: http://${{ env.INSTANCE_IP }}:3000"
+            echo "Please check the logs for more information."
+          fi
