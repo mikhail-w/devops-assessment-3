@@ -155,10 +155,16 @@ jobs:
       - name: Get Instance IP
         id: get-ip
         run: |
-          INSTANCE_ID=$(terraform output -raw instance_id)
-          IP_ADDRESS=$(terraform output -raw instance_public_ip)
+          # Get the raw outputs and clean them up
+          INSTANCE_ID=$(terraform output -raw instance_id | grep -oE '[a-zA-Z0-9_-]+' | head -1)
+          IP_ADDRESS=$(terraform output -raw instance_public_ip | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+
+          # Set the outputs properly
           echo "instance_ip=${IP_ADDRESS}" >> $GITHUB_OUTPUT
           echo "INSTANCE_IP=${IP_ADDRESS}" >> $GITHUB_ENV
+
+          # Debug what we're setting
+          echo "Found instance IP: ${IP_ADDRESS}"
 
       - name: Wait for instance to initialize
         run: |
