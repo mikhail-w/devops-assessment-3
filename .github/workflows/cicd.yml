@@ -173,7 +173,10 @@ jobs:
 
       - name: Copy configuration files
         run: |
-          # Copy docker-compose.yml to the server
+          # Create directory structure first
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "mkdir -p ~/pokedex-app"
+
+          # Then copy files
           scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./docker-compose.yml ubuntu@$INSTANCE_IP:~/pokedex-app/
 
           # Copy nginx.conf to the server if it exists
