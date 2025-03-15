@@ -18,13 +18,32 @@ jobs:
     name: Prepare SSH Keys
     runs-on: ubuntu-latest
     steps:
-      - name: Create SSH key
+      - name: Setup SSH key for debugging
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ${{ env.SSH_KEY_PATH }}
           chmod 600 ${{ env.SSH_KEY_PATH }}
           # Generate the public key from the private key
           ssh-keygen -y -f ${{ env.SSH_KEY_PATH }} > ${{ env.SSH_KEY_PATH }}.pub
+
+          # Debug output - show key fingerprints (safe to display)
+          echo "Private key fingerprint:"
+          ssh-keygen -l -f ${{ env.SSH_KEY_PATH }}
+
+          echo "Public key fingerprint:"
+          ssh-keygen -l -f ${{ env.SSH_KEY_PATH }}.pub
+
+          # Check key format - show first and last line only (safe to display)
+          echo "Private key format check (first line):"
+          head -n 1 ${{ env.SSH_KEY_PATH }}
+
+          echo "Private key format check (last line):"
+          tail -n 1 ${{ env.SSH_KEY_PATH }}
+
+          # Verify public key format
+          echo "Public key content:"
+          cat ${{ env.SSH_KEY_PATH }}.pub
+
           echo "SSH key created successfully at ${{ env.SSH_KEY_PATH }}"
 
   # 1. Test and Analyze Code
@@ -133,6 +152,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       instance_ip: ${{ steps.extract-ip.outputs.instance_public_ip }}
+      instance_id: ${{ steps.extract-instance-id.outputs.instance_id }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -156,6 +176,13 @@ jobs:
           chmod 600 ${{ env.SSH_KEY_PATH }}
           # Generate the public key from the private key
           ssh-keygen -y -f ${{ env.SSH_KEY_PATH }} > ${{ env.SSH_KEY_PATH }}.pub
+
+          # Debug output - show key fingerprints (safe to display)
+          echo "Private key fingerprint:"
+          ssh-keygen -l -f ${{ env.SSH_KEY_PATH }}
+
+          echo "Public key fingerprint:"
+          ssh-keygen -l -f ${{ env.SSH_KEY_PATH }}.pub
 
       # Delete existing resources that conflict with our Terraform configuration
       - name: Delete existing resources
@@ -249,10 +276,55 @@ jobs:
             echo "instance_public_ip=34.195.37.122" >> $GITHUB_OUTPUT
           fi
 
-      - name: Wait for instance to be ready
+      # Extract instance ID for later steps
+      - name: Extract Instance ID
+        id: extract-instance-id
         run: |
-          echo "Waiting for instance to be ready..."
-          sleep 60
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            echo "Found instance ID: $INSTANCE_ID"
+            echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
+          else
+            echo "Warning: Could not find instance ID"
+          fi
+
+      - name: Increase wait time for instance initialization
+        run: |
+          echo "Waiting for instance to fully initialize (user data script execution)..."
+          sleep 180  # Increase from 60 to 180 seconds
+
+          # Try to check instance system log via AWS CLI
+          echo "Checking instance system log for user data script execution..."
+          INSTANCE_ID=${{ steps.extract-instance-id.outputs.instance_id }}
+
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            echo "Getting console output for instance $INSTANCE_ID"
+            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Could not get console output"
+          else
+            echo "Could not find instance ID"
+          fi
+
+      - name: Check EC2 Instance Logs
+        run: |
+          INSTANCE_ID=${{ steps.extract-instance-id.outputs.instance_id }}
+
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            echo "Instance ID: $INSTANCE_ID"
+            
+            # Get instance system log
+            echo "System Log:"
+            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Could not retrieve system log"
+            
+            # Check instance status
+            echo "Instance Status:"
+            aws ec2 describe-instance-status --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }}
+            
+            # Check if instance is accessible via AWS Systems Manager
+            echo "Checking SSM status:"
+            aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" --region ${{ env.AWS_REGION }} || echo "Instance not accessible via SSM"
+          else
+            echo "Could not find instance ID"
+          fi
 
   # 4. Deploy Application
   deploy-application:
@@ -263,22 +335,32 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      # Set up SSH connection using the consistent key path
-      - name: Set up SSH connection
+      # Set up SSH with ssh-agent
+      - name: Setup SSH with ssh-agent
         run: |
+          # Start ssh-agent in the background
+          eval "$(ssh-agent -s)"
+
+          # Add SSH private key to ssh-agent
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          # Add host key to known hosts
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ${{ env.SSH_KEY_PATH }}
-          chmod 600 ${{ env.SSH_KEY_PATH }}
           ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+          # Test the connection with debugging
+          echo "Testing SSH connection with ssh-agent..."
+          ssh -v -o StrictHostKeyChecking=no ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH connection successful"' || echo "SSH connection failed, but continuing"
 
       - name: Wait for SSH to be available
         run: |
           count=0
-          max_attempts=20  # Increased max attempts for better reliability
+          max_attempts=25  # Increased max attempts for better reliability
           echo "Waiting for SSH service to become available..."
 
           # Test SSH connection with timeout and verbose debugging
-          until timeout 15s ssh -i ${{ env.SSH_KEY_PATH }} -v -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
+          until ssh -v -o StrictHostKeyChecking=no -o ConnectTimeout=15 ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'echo "SSH is up"' || [ $count -eq $max_attempts ]
           do
             echo "Waiting for SSH to be available... (attempt $count/$max_attempts)"
             sleep 30  # Increased sleep time for better reliability
@@ -291,28 +373,34 @@ jobs:
             ping -c 4 ${{ needs.provision-infrastructure.outputs.instance_ip }}
             echo "Checking if port 22 is open:"
             nc -zv ${{ needs.provision-infrastructure.outputs.instance_ip }} 22
+            
+            # Get system log again for debugging
+            echo "Retrieving system log for debugging:"
+            INSTANCE_ID=${{ needs.provision-infrastructure.outputs.instance_id }}
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Could not get console output"
+            fi
+            
             exit 1
           fi
 
       - name: Create deployment directory
         run: |
-          ssh -i ${{ env.SSH_KEY_PATH }} ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
-            mkdir -p ~/pokedex-app
-          '
+          ssh ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} 'mkdir -p ~/pokedex-app'
 
       - name: Copy configuration files
         run: |
           # Use explicit paths based on your repository structure
           echo "Copying docker-compose.yml from repository root"
-          scp -i ${{ env.SSH_KEY_PATH }} ./docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          scp ./docker-compose.yml ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
 
           echo "Copying nginx.conf from frontend directory"
-          scp -i ${{ env.SSH_KEY_PATH }} ./frontend/nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
+          scp ./frontend/nginx.conf ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }}:~/pokedex-app/
 
       # Modified deployment script to properly handle environment variables and ensure Docker Compose runs
       - name: Deploy with Docker Compose
         run: |
-          ssh -i ${{ env.SSH_KEY_PATH }} ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} "
+          ssh ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} "
             cd ~/pokedex-app
             
             # Create a clean .env file directly on the server
@@ -407,12 +495,18 @@ jobs:
     needs: [provision-infrastructure, deploy-application]
     runs-on: ubuntu-latest
     steps:
-      - name: Setup SSH key for monitoring
+      - name: Setup SSH with ssh-agent for monitoring
         run: |
+          # Start ssh-agent in the background
+          eval "$(ssh-agent -s)"
+
+          # Add SSH private key to ssh-agent
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' | ssh-add -
+
+          # Add host key to known hosts
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ${{ env.SSH_KEY_PATH }}
-          chmod 600 ${{ env.SSH_KEY_PATH }}
           ssh-keyscan -H ${{ needs.provision-infrastructure.outputs.instance_ip }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Check frontend availability
         id: frontend-health
@@ -437,7 +531,7 @@ jobs:
       - name: Set up monitoring
         run: |
           echo "Setting up monitoring on the server..."
-          ssh -i ${{ env.SSH_KEY_PATH }} ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
+          ssh ubuntu@${{ needs.provision-infrastructure.outputs.instance_ip }} '
             # Check if node exporter is installed
             if ! command -v prometheus-node-exporter &> /dev/null; then
               # Install monitoring tools
