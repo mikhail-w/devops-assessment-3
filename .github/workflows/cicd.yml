@@ -46,7 +46,7 @@ jobs:
 
           echo "SSH key created successfully at ${{ env.SSH_KEY_PATH }}"
 
-  # 1. Test and Analyze Code
+  # 1. Test and Analyze  Code
   test:
     name: Test Application
     runs-on: ubuntu-latest
