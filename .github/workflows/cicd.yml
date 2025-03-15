@@ -164,6 +164,12 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      - name: Test AWS Credentials
+        run: |
+          echo "Verifying AWS credentials..."
+          aws sts get-caller-identity
+          aws ec2 describe-regions --region ${{ env.AWS_REGION }}
+
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
@@ -184,7 +190,11 @@ jobs:
           echo "Public key fingerprint:"
           ssh-keygen -l -f ${{ env.SSH_KEY_PATH }}.pub
 
-      # Delete existing resources that conflict with our Terraform configuration
+          # Verify public key format
+          echo "Public key content (this will be used by Terraform):"
+          cat ${{ env.SSH_KEY_PATH }}.pub
+
+      # Enhanced resource cleanup with better dependency handling
       - name: Delete existing resources
         run: |
           echo "Attempting to delete existing resources that might conflict..."
@@ -198,10 +208,25 @@ jobs:
           SG_ID=$(aws ec2 describe-security-groups --group-names pokedex-app-sg --query 'SecurityGroups[0].GroupId' --output text --region ${{ env.AWS_REGION }} 2>/dev/null || echo "")
 
           if [ ! -z "$SG_ID" ] && [ "$SG_ID" != "None" ]; then
-            echo "Found security group $SG_ID, attempting to delete..."
-            # Some security groups may have rules that need to be deleted first, or attached resources
-            # We'll wait a bit to allow any dependencies to clear
-            sleep 10
+            echo "Found security group $SG_ID, checking for dependencies..."
+            
+            # Check for network interfaces using this security group
+            INTERFACES=$(aws ec2 describe-network-interfaces --filters Name=group-id,Values=$SG_ID --query 'NetworkInterfaces[*].NetworkInterfaceId' --output text --region ${{ env.AWS_REGION }})
+            
+            if [ ! -z "$INTERFACES" ]; then
+              echo "Found network interfaces using this security group. Detaching them first..."
+              for INTERFACE in $INTERFACES; do
+                echo "Detaching network interface $INTERFACE..."
+                aws ec2 delete-network-interface --network-interface-id $INTERFACE --region ${{ env.AWS_REGION }} || true
+              done
+              
+              # Wait for interface deletion
+              echo "Waiting for network interfaces to be fully deleted..."
+              sleep 30
+            fi
+            
+            # Try to delete the security group
+            echo "Attempting to delete security group $SG_ID..."
             aws ec2 delete-security-group --group-id $SG_ID --region ${{ env.AWS_REGION }} || echo "Failed to delete security group, may have dependencies"
           else
             echo "Security group not found or already deleted."
@@ -210,35 +235,45 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      - name: Terraform Plan
-        run: terraform plan -out=tfplan
-        env:
-          TF_VAR_instance_type: t2.micro
-          TF_VAR_app_name: pokedex-app
-
-      - name: Terraform Apply
+      - name: Terraform Plan with Debugging
         run: |
-          terraform apply -auto-approve tfplan
+          # Enable Terraform debug logging
+          export TF_LOG=DEBUG
+
+          # Use timeout to prevent indefinite hangs
+          timeout 300 terraform plan -out=tfplan || (echo "Terraform plan timed out after 5 minutes" && exit 1)
         env:
           TF_VAR_instance_type: t2.micro
           TF_VAR_app_name: pokedex-app
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
 
-      # Extract IP address directly from terraform apply output
+      - name: Terraform Apply
+        run: |
+          # Redirect output to a file for later parsing
+          terraform apply -auto-approve tfplan 2>&1 | tee terraform_apply_output.txt
+        env:
+          TF_VAR_instance_type: t2.micro
+          TF_VAR_app_name: pokedex-app
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+
+      # Extract IP address with improved handling
       - name: Extract IP from Terraform output
         id: extract-ip
         run: |
-          # Initialize IP_ADDRESS variable
-          IP_ADDRESS=""
+          # First try: Use terraform output command directly
+          echo "Attempting to get IP using 'terraform output' command..."
+          IP_ADDRESS=$(terraform output -raw instance_public_ip 2>/dev/null || echo "")
 
-          # Look for IP addresses in the terraform apply output
-          echo "Searching for IP in terraform_apply_output.txt..."
-          if [ -f terraform_apply_output.txt ]; then
-            echo "Found terraform_apply_output.txt file"
-            cat terraform_apply_output.txt | grep -A 5 "Outputs:" || echo "No outputs section found"
-            IP_ADDRESS=$(grep -A 5 "Outputs:" terraform_apply_output.txt | grep "instance_public_ip" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
-          else
-            echo "terraform_apply_output.txt not found"
+          # If that didn't work, try parsing from the apply output file
+          if [ -z "$IP_ADDRESS" ]; then
+            echo "Searching for IP in terraform_apply_output.txt..."
+            if [ -f terraform_apply_output.txt ]; then
+              echo "Found terraform_apply_output.txt file"
+              cat terraform_apply_output.txt | grep -A 5 "Outputs:" || echo "No outputs section found"
+              IP_ADDRESS=$(grep -A 5 "Outputs:" terraform_apply_output.txt | grep "instance_public_ip" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" || echo "")
+            else
+              echo "terraform_apply_output.txt not found"
+            fi
           fi
 
           # If not found in the output, look in the terraform state file directly
@@ -258,15 +293,21 @@ jobs:
             
             if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
               echo "Found instance ID: $INSTANCE_ID"
+              
+              # Wait a moment for the Elastic IP to be fully associated
+              echo "Waiting for Elastic IP association..."
+              sleep 20
+              
               IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }} || echo "")
               echo "Instance IP from AWS CLI: $IP_ADDRESS"
+              
+              # If still no IP, try checking for Elastic IPs associated with the instance
+              if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
+                echo "Checking for Elastic IPs associated with the instance..."
+                IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=$INSTANCE_ID" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }} || echo "")
+                echo "Elastic IP from AWS CLI: $IP_ADDRESS"
+              fi
             fi
-          fi
-
-          # If we still don't have an IP address, use the known IP from AWS console screenshot
-          if [ -z "$IP_ADDRESS" ]; then
-            echo "Using instance IP from AWS console as fallback: 34.195.37.122"
-            IP_ADDRESS="34.195.37.122"
           fi
 
           # Final validation to ensure IP is in correct format
@@ -283,7 +324,14 @@ jobs:
       - name: Extract Instance ID
         id: extract-instance-id
         run: |
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+          # Try getting instance ID from Terraform output first
+          INSTANCE_ID=$(terraform output -raw instance_id 2>/dev/null || echo "")
+
+          # If that doesn't work, query AWS directly
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+          fi
+
           if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
             echo "Found instance ID: $INSTANCE_ID"
             echo "instance_id=$INSTANCE_ID" >> $GITHUB_OUTPUT
@@ -291,20 +339,43 @@ jobs:
             echo "Warning: Could not find instance ID"
           fi
 
-      - name: Increase wait time for instance initialization
+      # Improved instance readiness check
+      - name: Wait for instance readiness
         run: |
-          echo "Waiting for instance to fully initialize (user data script execution)..."
-          sleep 240  # Increased from 180 to 240 seconds (4 minutes)
-
-          # Try to check instance system log via AWS CLI
-          echo "Checking instance system log for user data script execution..."
           INSTANCE_ID=${{ steps.extract-instance-id.outputs.instance_id }}
+          IP_ADDRESS=${{ steps.extract-ip.outputs.instance_public_ip }}
 
           if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
-            echo "Getting console output for instance $INSTANCE_ID"
-            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Could not get console output"
+            echo "Waiting for instance to reach running state..."
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+            
+            echo "Waiting for instance to pass status checks..."
+            aws ec2 wait instance-status-ok --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+            
+            echo "Waiting for SSH port to be accessible..."
+            timeout=600  # 10 minutes timeout
+            end_time=$(($(date +%s) + timeout))
+            
+            while [ $(date +%s) -lt $end_time ]; do
+              if nc -z -w 5 $IP_ADDRESS 22; then
+                echo "SSH port is now accessible!"
+                break
+              fi
+              echo "Waiting for SSH port to become accessible... ($(($end_time - $(date +%s))) seconds remaining)"
+              sleep 15
+            done
+            
+            if ! nc -z -w 5 $IP_ADDRESS 22; then
+              echo "Warning: SSH port did not become accessible within timeout period"
+            fi
           else
-            echo "Could not find instance ID"
+            echo "Instance ID not found, waiting a fixed period..."
+            sleep 180
+          fi
+
+          echo "Getting console output for debugging..."
+          if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Could not get console output"
           fi
 
       - name: Check EC2 Instance Logs
@@ -321,6 +392,10 @@ jobs:
             # Check instance status
             echo "Instance Status:"
             aws ec2 describe-instance-status --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }}
+            
+            # Check for any error messages in the console output
+            echo "Checking for potential errors in console output..."
+            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} | grep -E 'error|failed|warning' || echo "No obvious errors found in console output"
           else
             echo "Could not find instance ID"
           fi
