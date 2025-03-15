@@ -473,6 +473,66 @@ jobs:
             DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
             EOF
             
+            # Copy the updated nginx.conf
+            cat > nginx.conf << 'EOF'
+            server {
+                listen 80;
+                server_name localhost;
+                root /usr/share/nginx/html;
+                index index.html;
+            
+                # Disable any automatic HTTPS redirects
+                absolute_redirect off;
+            
+                # Gzip compression
+                gzip on;
+                gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+                
+                # Handle Single Page Application routing
+                location / {
+                    try_files $uri $uri/ /index.html;
+                    
+                    # Explicitly prevent any HTTP to HTTPS redirects
+                    proxy_redirect off;
+                    
+                    # Add Cross-Origin headers
+                    add_header 'Access-Control-Allow-Origin' '*';
+                    add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS';
+                    add_header 'Access-Control-Allow-Headers' 'DNT,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Range';
+                }
+            
+                # API proxy configuration
+                location /api/ {
+                    proxy_pass http://backend:3000/;
+                    proxy_http_version 1.1;
+                    proxy_set_header Upgrade $http_upgrade;
+                    proxy_set_header Connection 'upgrade';
+                    proxy_set_header Host $host;
+                    proxy_cache_bypass $http_upgrade;
+                }
+            
+                # Cache static assets
+                location ~* \.(jpg|jpeg|png|gif|ico|css|js)$ {
+                    expires 1d;
+                    add_header Cache-Control "public";
+                }
+            
+                # Error handling
+                error_page 404 /index.html;
+                error_page 500 502 503 504 /50x.html;
+                location = /50x.html {
+                    root /usr/share/nginx/html;
+                }
+            }
+            EOF
+            
+            # Make sure Docker is running
+            sudo systemctl start docker
+            sudo systemctl enable docker
+            
+            # Stop any running containers
+            sudo docker-compose down
+            
             # Pull the latest images
             sudo docker-compose pull
             
@@ -481,6 +541,16 @@ jobs:
             
             # Print container status
             sudo docker-compose ps
+            
+            # Check container logs (last 20 lines each)
+            echo "Frontend logs:"
+            sudo docker-compose logs --tail=20 frontend
+            
+            echo "Backend logs:"
+            sudo docker-compose logs --tail=20 backend
+            
+            echo "Database logs:"
+            sudo docker-compose logs --tail=20 db
           ENDSSH
 
   # 5. Health Check and Monitoring
@@ -550,9 +620,31 @@ jobs:
           MAX_ATTEMPTS=10
           ATTEMPT=1
 
+          # First check if the server itself can access the frontend
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP_ADDRESS << 'ENDSSH'
+            echo "Checking frontend locally from server:"
+            curl -v http://localhost:80
+            
+            echo "Checking if Docker containers are running:"
+            sudo docker ps
+            
+            echo "Checking Docker networks:"
+            sudo docker network ls
+            
+            echo "Getting container IPs:"
+            for CONTAINER_ID in $(sudo docker ps -q); do
+              echo "Container: $(sudo docker inspect --format '{{.Name}}' $CONTAINER_ID)"
+              echo "IP: $(sudo docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $CONTAINER_ID)"
+            done
+            
+            echo "Checking if nginx is listening on port 80:"
+            sudo netstat -tulpn | grep :80
+          ENDSSH
+
+          # Then try to access it from GitHub runner
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             echo "Attempt $ATTEMPT of $MAX_ATTEMPTS..."
-            if curl -s -f -m 10 "http://$IP_ADDRESS"; then
+            if curl -s -f -m 10 -L "http://$IP_ADDRESS"; then
               echo "Frontend is available!"
               echo "frontend_available=true" >> $GITHUB_OUTPUT
               break
@@ -566,6 +658,24 @@ jobs:
           if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
             echo "Frontend health check failed after $MAX_ATTEMPTS attempts"
             echo "frontend_available=false" >> $GITHUB_OUTPUT
+            
+            # Add additional diagnostics
+            echo "Running diagnostics on the server..."
+            ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP_ADDRESS << 'ENDSSH'
+              echo "Checking Docker container logs:"
+              sudo docker-compose -f ~/pokedex-app/docker-compose.yml logs --tail=50 frontend
+              
+              echo "Checking Nginx config inside container:"
+              FRONTEND_CONTAINER=$(sudo docker ps -q -f name=frontend)
+              if [ ! -z "$FRONTEND_CONTAINER" ]; then
+                sudo docker exec $FRONTEND_CONTAINER cat /etc/nginx/conf.d/default.conf
+              else
+                echo "Frontend container not found"
+              fi
+              
+              echo "Checking server firewall status:"
+              sudo ufw status
+            ENDSSH
           fi
 
       - name: Check backend API availability
