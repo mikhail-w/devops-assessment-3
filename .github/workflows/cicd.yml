@@ -166,7 +166,29 @@ jobs:
 
       - name: Test AWS Credentials
         run: |
+          echo "Validating AWS credentials and permissions..."
+
+          # Get caller identity
           aws sts get-caller-identity
+
+          # Check if we can list EC2 instances
+          echo "Checking EC2 permissions..."
+          aws ec2 describe-instances --region ${{ env.AWS_REGION }} --max-items 5
+
+          # Check current EC2 quotas/limits
+          echo "Checking EC2 service quotas..."
+          aws service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A --region ${{ env.AWS_REGION }} || echo "Could not get quota info, but continuing"
+
+          # Check if VPC exists
+          echo "Checking default VPC..."
+          aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --region ${{ env.AWS_REGION }}
+
+          # List available subnets in default VPC
+          echo "Listing available subnets..."
+          DEFAULT_VPC_ID=$(aws ec2 describe-vpcs --filters "Name=isDefault,Values=true" --query "Vpcs[0].VpcId" --output text --region ${{ env.AWS_REGION }})
+          aws ec2 describe-subnets --filters "Name=vpc-id,Values=$DEFAULT_VPC_ID" --region ${{ env.AWS_REGION }}
+
+          echo "AWS region being used: ${{ env.AWS_REGION }}"
           aws ec2 describe-regions --output json | jq -r '.Regions[0].RegionName' || echo "Region listing failed"
 
       - name: Setup Terraform
@@ -234,18 +256,60 @@ jobs:
 
       - name: Terraform Apply Directly
         run: |
-          # Skip plan and go straight to apply for simplicity
-          terraform apply -auto-approve
+          # Set Terraform to verbose logging
+          export TF_LOG=DEBUG
+
+          # Apply and capture all output for debugging
+          terraform apply -auto-approve 2>&1 | tee terraform-apply.log
+
+          # Check Terraform state for instance after apply
+          echo "Checking Terraform state after apply..."
+          terraform state show aws_instance.app_server || echo "Could not find instance in Terraform state"
+
+          # Check AWS directly to see if instance exists
+          echo "Checking AWS directly for instance..."
+          aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[*].Instances[*].[InstanceId,State.Name]" --output table --region ${{ env.AWS_REGION }}
 
       - name: Extract IP from AWS
         id: extract-ip
         run: |
-          # Extract IP using AWS CLI
-          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
+          # Debug instance state first
+          echo "Checking for instances with tag pokedex-app-server..."
+          aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[*].Instances[*].[InstanceId,State.Name]" --output table --region ${{ env.AWS_REGION }}
 
-          # Wait for instance to be fully initialized
-          echo "Waiting for instance $INSTANCE_ID to be in running state..."
-          aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          # Extract instance ID using AWS CLI
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
+          echo "Found Instance ID: ${INSTANCE_ID}"
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
+            echo "ERROR: No instance found with tag Name=pokedex-app-server"
+            exit 1
+          fi
+
+          # Check instance state explicitly
+          INSTANCE_STATE=$(aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].State.Name" --output text --region ${{ env.AWS_REGION }})
+          echo "Instance state: $INSTANCE_STATE"
+
+          if [ "$INSTANCE_STATE" != "running" ]; then
+            echo "WARNING: Instance is not in running state. Current state: $INSTANCE_STATE"
+            
+            # Check console output for debugging
+            echo "Getting console output for debugging..."
+            aws ec2 get-console-output --instance-id $INSTANCE_ID --region ${{ env.AWS_REGION }} || echo "Unable to get console output"
+            
+            if [ "$INSTANCE_STATE" == "terminated" ]; then
+              echo "ERROR: Instance was terminated. Checking termination reason..."
+              aws ec2 describe-instances --instance-ids $INSTANCE_ID --query "Reservations[0].Instances[0].StateReason" --output json --region ${{ env.AWS_REGION }}
+              exit 1
+            fi
+          fi
+
+          # Only wait if instance is pending
+          if [ "$INSTANCE_STATE" == "pending" ]; then
+            # Wait for instance to be running
+            echo "Waiting for instance $INSTANCE_ID to be in running state..."
+            aws ec2 wait instance-running --instance-ids $INSTANCE_ID --region ${{ env.AWS_REGION }}
+          fi
 
           # First try to get the Elastic IP (more reliable)
           IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
@@ -453,7 +517,23 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
-          ssh-keyscan -H ${{ env.INSTANCE_IP }} >> ~/.ssh/known_hosts 2>/dev/null || echo "ssh-keyscan failed but continuing"
+
+          # Get the IP directly from AWS again to ensure we have it
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }})
+
+          # Get IP address (try Elastic IP first, then public IP)
+          IP_ADDRESS=$(aws ec2 describe-addresses --filters "Name=instance-id,Values=${INSTANCE_ID}" --query "Addresses[0].PublicIp" --output text --region ${{ env.AWS_REGION }})
+          if [ -z "$IP_ADDRESS" ] || [ "$IP_ADDRESS" == "None" ]; then
+            IP_ADDRESS=$(aws ec2 describe-instances --instance-ids "${INSTANCE_ID}" --query "Reservations[0].Instances[0].PublicIpAddress" --output text --region ${{ env.AWS_REGION }})
+          fi
+
+          echo "Using IP address: $IP_ADDRESS"
+
+          # Store IP in a file for later steps
+          echo "$IP_ADDRESS" > ~/.ssh/instance_ip
+
+          # Add to known hosts if possible
+          ssh-keyscan -H $IP_ADDRESS >> ~/.ssh/known_hosts 2>/dev/null || echo "ssh-keyscan failed but continuing"
 
       - name: Wait for services to start
         run: |
@@ -462,28 +542,67 @@ jobs:
 
       - name: Check frontend availability
         id: frontend-health
-        uses: jtalk/url-health-check-action@v3
-        with:
-          url: http://${{ env.INSTANCE_IP }}
-          max-attempts: 10
-          retry-delay: 15s
-          follow-redirect: true
-        continue-on-error: true
+        run: |
+          # Get IP address from file
+          IP_ADDRESS=$(cat ~/.ssh/instance_ip)
+
+          echo "Checking frontend at http://$IP_ADDRESS"
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS..."
+            if curl -s -f -m 10 "http://$IP_ADDRESS"; then
+              echo "Frontend is available!"
+              echo "frontend_available=true" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "Frontend not available yet, waiting..."
+              sleep 15
+              ATTEMPT=$((ATTEMPT+1))
+            fi
+          done
+
+          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "Frontend health check failed after $MAX_ATTEMPTS attempts"
+            echo "frontend_available=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Check backend API availability
         id: backend-health
-        uses: jtalk/url-health-check-action@v3
-        with:
-          url: http://${{ env.INSTANCE_IP }}:3000/admin/
-          max-attempts: 10
-          retry-delay: 15s
-          follow-redirect: true
-        continue-on-error: true
+        run: |
+          # Get IP address from file
+          IP_ADDRESS=$(cat ~/.ssh/instance_ip)
+
+          echo "Checking backend API at http://$IP_ADDRESS:3000/admin/"
+          MAX_ATTEMPTS=10
+          ATTEMPT=1
+
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "Attempt $ATTEMPT of $MAX_ATTEMPTS..."
+            if curl -s -f -m 10 "http://$IP_ADDRESS:3000/admin/"; then
+              echo "Backend API is available!"
+              echo "backend_available=true" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "Backend API not available yet, waiting..."
+              sleep 15
+              ATTEMPT=$((ATTEMPT+1))
+            fi
+          done
+
+          if [ $ATTEMPT -gt $MAX_ATTEMPTS ]; then
+            echo "Backend API health check failed after $MAX_ATTEMPTS attempts"
+            echo "backend_available=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Set up monitoring
         run: |
+          # Get IP address from file
+          IP_ADDRESS=$(cat ~/.ssh/instance_ip)
+
           echo "Setting up monitoring on the server..."
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} '
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP_ADDRESS '
             # Check if node exporter is installed
             if ! command -v prometheus-node-exporter &> /dev/null; then
               # Install monitoring tools
@@ -511,7 +630,10 @@ jobs:
 
       - name: Check Docker container status
         run: |
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@${{ env.INSTANCE_IP }} '
+          # Get IP address from file
+          IP_ADDRESS=$(cat ~/.ssh/instance_ip)
+
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$IP_ADDRESS '
             echo "Docker container status:"
             sudo docker ps -a
             
@@ -526,21 +648,24 @@ jobs:
 
       - name: Generate deployment report
         run: |
-          FRONTEND_STATUS="${{ steps.frontend-health.outcome }}"
-          BACKEND_STATUS="${{ steps.backend-health.outcome }}"
+          # Get IP address from file
+          IP_ADDRESS=$(cat ~/.ssh/instance_ip)
+
+          FRONTEND_STATUS="${{ steps.frontend-health.outputs.frontend_available }}"
+          BACKEND_STATUS="${{ steps.backend-health.outputs.backend_available }}"
 
           echo "Frontend health check: $FRONTEND_STATUS"
           echo "Backend health check: $BACKEND_STATUS"
 
-          if [ "$FRONTEND_STATUS" == "success" ] || [ "$BACKEND_STATUS" == "success" ]; then
+          if [ "$FRONTEND_STATUS" == "true" ] || [ "$BACKEND_STATUS" == "true" ]; then
             echo "deployment_success=true" >> $GITHUB_OUTPUT
             echo "Deployment completed successfully!"
-            echo "Application URL: http://${{ env.INSTANCE_IP }}"
-            echo "Backend API URL: http://${{ env.INSTANCE_IP }}:3000"
+            echo "Application URL: http://$IP_ADDRESS"
+            echo "Backend API URL: http://$IP_ADDRESS:3000"
           else
             echo "deployment_success=false" >> $GITHUB_OUTPUT
             echo "Warning: Deployment health checks failed or partially failed."
-            echo "Application URL: http://${{ env.INSTANCE_IP }}"
-            echo "Backend API URL: http://${{ env.INSTANCE_IP }}:3000"
+            echo "Application URL: http://$IP_ADDRESS"
+            echo "Backend API URL: http://$IP_ADDRESS:3000"
             echo "Please check the logs for more information."
           fi
