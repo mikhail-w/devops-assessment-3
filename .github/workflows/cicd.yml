@@ -324,12 +324,15 @@ jobs:
       - name: Extract Instance ID
         id: extract-instance-id
         run: |
-          # Try getting instance ID from Terraform output first
-          INSTANCE_ID=$(terraform output -raw instance_id 2>/dev/null || echo "")
+          # Try getting instance ID directly from AWS
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
 
-          # If that doesn't work, query AWS directly
+          # If no instance found via AWS, try to parse from state file
           if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" == "None" ]; then
-            INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=pokedex-app-server" --query "Reservations[0].Instances[0].InstanceId" --output text --region ${{ env.AWS_REGION }} || echo "")
+            echo "Instance not found via AWS query, trying to parse from terraform state..."
+            if [ -f terraform.tfstate ]; then
+              INSTANCE_ID=$(grep -o '"id": "i-[a-z0-9]*"' terraform.tfstate | head -1 | grep -o 'i-[a-z0-9]*' || echo "")
+            fi
           fi
 
           if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
