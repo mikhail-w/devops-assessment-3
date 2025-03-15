@@ -21,10 +21,15 @@ variable "app_name" {
   default     = "pokedex-app"
 }
 
+variable "ssh_public_key" {
+  description = "Public SSH key for EC2 instance access"
+  type        = string
+}
+
 # SSH Key Pair
 resource "aws_key_pair" "deployer" {
   key_name   = "${var.app_name}-key"
-  public_key = file("~/.ssh/terraform-ec2.pub")
+  public_key = var.ssh_public_key
 }
 
 # Security Group
