@@ -284,25 +284,38 @@ jobs:
         uses: actions/checkout@v3
 
       # Set up direct SSH connection (more reliable than ssh-agent)
-      - name: Setup SSH connection
+      - name: Setup SSH connection with retries
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/terraform-ec2
           chmod 600 ~/.ssh/terraform-ec2
 
-          # Get IP address directly from previous job output
           IP="${{ needs.provision-infrastructure.outputs.instance_ip }}"
-          echo "Using IP address: $IP"
+          echo "Target IP address: $IP"
 
-          # Add IP address to /etc/hosts to avoid DNS issues
-          echo "$IP ec2-instance" | sudo tee -a /etc/hosts
+          # Ping the instance to verify basic connectivity
+          ping -c 4 $IP || echo "Ping failed but continuing"
 
-          # Add to known hosts using IP address directly
-          ssh-keyscan -H $IP >> ~/.ssh/known_hosts
+          # Try SSH connection with multiple attempts
+          MAX_RETRIES=5
+          RETRY_COUNT=0
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "SSH connection attempt $((RETRY_COUNT+1))/$MAX_RETRIES..."
+            if ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$IP 'echo "SSH connection test"'; then
+              echo "SSH connection successful!"
+              echo "$IP" > ~/.ssh/instance_ip
+              break
+            else
+              echo "Connection attempt failed, waiting before retry..."
+              RETRY_COUNT=$((RETRY_COUNT+1))
+              sleep 30
+            fi
+          done
 
-          # Test connection with verbose output and IP address
-          echo "Testing SSH connection..."
-          ssh -v -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no -o ConnectTimeout=30 ubuntu@$IP 'echo "SSH connection test"' || echo "Initial test connection failed, will retry"
+          if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+            echo "Failed to establish SSH connection after $MAX_RETRIES attempts"
+            exit 1
+          fi
 
       - name: Wait for SSH to be available
         run: |
