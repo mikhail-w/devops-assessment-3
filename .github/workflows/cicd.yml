@@ -184,151 +184,179 @@ jobs:
 
       - name: Deploy with Docker Compose
         run: |
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << EOF
-            # Create app directory if it doesn't exist
-            mkdir -p ~/pokedex-app
-            cd ~/pokedex-app
-            
-            # Get the server's public IP address
-            SERVER_IP=\$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-            
-            # Create .env file with environment variables
-            cat > .env << EOT
-            DB_USER=${{ secrets.DB_USER || 'admin' }}
-            DB_PASS=${{ secrets.DB_PASS || 'your_db_password' }}
-            DB_NAME=${{ secrets.DB_NAME || 'pokedex_db' }}
-            API_URL=http://\${SERVER_IP}:3000
-            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-8aflf8_(qc+ayi87@xam^u=y9b^w0%_=-3ep3ekz(qy06(2)4_' }}
-            NODE_ENV=production
-            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
-            EOT
-            
-            # Print environment file for debugging
-            echo "Contents of .env file:"
-            cat .env
-            
-            # Ensure Docker is installed and running
-            if ! command -v docker &> /dev/null; then
-              echo 'Docker not found, installing...'
-              sudo apt-get update
-              sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-              curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-              sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable"
-              sudo apt-get update
-              sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-            fi
-            
-            # Start Docker service if not running
-            if ! sudo systemctl is-active --quiet docker; then
-              echo 'Starting Docker service...'
-              sudo systemctl start docker
-              sudo systemctl enable docker
-            fi
-            
-            # Ensure Docker Compose is installed
-            if ! command -v docker-compose &> /dev/null; then
-              echo 'Docker Compose not found, installing...'
-              sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-\$(uname -s)-\$(uname -m)" -o /usr/local/bin/docker-compose
-              sudo chmod +x /usr/local/bin/docker-compose
-            fi
-            
-            # Verify docker-compose.yml exists
-            if [ ! -f docker-compose.yml ]; then
-              echo 'ERROR: docker-compose.yml not found!'
-              ls -la
-              exit 1
-            fi
-            
-            # Display docker-compose.yml content
-            echo "Contents of docker-compose.yml:"
-            cat docker-compose.yml
-            
-            # Fix permissions and create explicit docker-compose.yml with images
-            echo "Creating explicit docker-compose with correct image references..."
-            cat > docker-compose.yml << EOYAML
-            version: '3.8'
+          # First create a debug script to run on the server
+          cat > deploy-debug.sh << 'EOF'
+          #!/bin/bash
+          set -e  # Exit on any error
 
-            services:
-              frontend:
-                image: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
-                container_name: pokedex-frontend
-                restart: always
-                ports:
-                  - "80:80"
-                depends_on:
-                  - backend
-                environment:
-                  - API_URL=\${API_URL}
-                  - NODE_ENV=\${NODE_ENV}
+          echo "===== DEPLOYMENT DEBUG SCRIPT START ====="
+          echo "Running as user: $(whoami)"
+          echo "Current directory: $(pwd)"
 
-              backend:
-                image: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
-                container_name: pokedex-backend
-                restart: always
-                ports:
-                  - "3000:3000"
-                environment:
-                  - DB_USER=\${DB_USER}
-                  - DB_PASS=\${DB_PASS}
-                  - DB_NAME=\${DB_NAME}
-                  - DB_HOST=db
-                  - DJANGO_SECRET_KEY=\${DJANGO_SECRET_KEY}
+          # Create app directory if it doesn't exist
+          mkdir -p ~/pokedex-app
+          cd ~/pokedex-app
+          echo "Working directory: $(pwd)"
 
-              db:
-                image: postgres:14
-                container_name: pokedex-db
-                restart: always
-                volumes:
-                  - postgres_data:/var/lib/postgresql/data/
-                environment:
-                  - POSTGRES_USER=\${DB_USER}
-                  - POSTGRES_PASSWORD=\${DB_PASS}
-                  - POSTGRES_DB=\${DB_NAME}
+          # Get the server's public IP address
+          SERVER_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+          echo "Server IP: $SERVER_IP"
 
-            volumes:
-              postgres_data:
-            EOYAML
-            
-            # Make sure user has permission to run docker-compose
-            sudo usermod -aG docker \$USER
-            newgrp docker || true
-            
-            # Stop any existing containers to avoid conflicts
-            echo 'Stopping any existing containers...'
-            sudo docker-compose down || echo "No containers to stop"
-            
-            # Login to DockerHub to prevent rate limiting and ensure access to private images
-            echo "Logging into Docker Hub"
-            echo "${{ secrets.DOCKER_HUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
-            
-            # Pull latest images
-            echo 'Pulling latest images...'
-            sudo docker-compose pull || (echo "Error pulling images, checking for errors:" && sudo docker-compose config)
-            
-            # Start containers with force-recreate to ensure fresh start
-            echo 'Starting containers...'
-            sudo docker-compose up -d --force-recreate
-            
-            # Check if containers are running
-            echo 'Container status:'
-            sudo docker-compose ps
-            sudo docker ps -a
-            
-            # Show logs for troubleshooting
-            echo 'Container logs (frontend):'
-            sudo docker-compose logs --tail=20 frontend || echo "No frontend logs available"
-            
-            echo 'Container logs (backend):'
-            sudo docker-compose logs --tail=20 backend || echo "No backend logs available"
-            
-            # Check for any Docker errors
-            echo 'Checking Docker daemon logs for errors:'
-            sudo journalctl -u docker --no-pager | tail -n 50
-            
-            # Clean up old images
-            echo 'Cleaning up old images...'
-            sudo docker image prune -f --filter "until=24h"
+          # Ensure Docker is installed
+          if ! command -v docker &> /dev/null; then
+            echo "Docker not found, installing..."
+            sudo apt-get update
+            sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
+            sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+            sudo apt-get update
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io
+          else
+            echo "Docker is already installed: $(docker --version)"
+          fi
+
+          # Start Docker service
+          echo "Ensuring Docker service is running..."
+          sudo systemctl start docker
+          sudo systemctl enable docker
+          sudo systemctl status docker
+
+          # Ensure Docker Compose is installed
+          if ! command -v docker-compose &> /dev/null; then
+            echo "Docker Compose not found, installing..."
+            sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+            sudo chmod +x /usr/local/bin/docker-compose
+          else
+            echo "Docker Compose is already installed: $(docker-compose --version)"  
+          fi
+
+          # Make sure user has permission to run docker
+          echo "Adding current user to docker group..."
+          sudo usermod -aG docker $USER
+
+          # LOGIN TO DOCKER HUB EXPLICITLY
+          echo "Logging into Docker Hub..."
+          echo "$DOCKER_HUB_TOKEN" | sudo docker login -u "$DOCKER_HUB_USERNAME" --password-stdin
+
+          # Create .env file
+          echo "Creating .env file..."
+          cat > .env << EOT
+          DB_USER=$DB_USER
+          DB_PASS=$DB_PASS
+          DB_NAME=$DB_NAME
+          API_URL=http://${SERVER_IP}:3000
+          DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
+          NODE_ENV=production
+          DOCKER_HUB_USERNAME=$DOCKER_HUB_USERNAME
+          EOT
+
+          echo "Contents of .env file:"
+          cat .env
+
+          # Create docker-compose.yml explicitly
+          echo "Creating docker-compose.yml..."
+          cat > docker-compose.yml << EOYAML
+          version: '3.8'
+
+          services:
+            frontend:
+              image: ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
+              container_name: pokedex-frontend
+              restart: always
+              ports:
+                - "80:80"
+              depends_on:
+                - backend
+              environment:
+                - API_URL=\${API_URL}
+                - NODE_ENV=\${NODE_ENV}
+
+            backend:
+              image: ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
+              container_name: pokedex-backend
+              restart: always
+              ports:
+                - "3000:3000"
+              environment:
+                - DB_USER=\${DB_USER}
+                - DB_PASS=\${DB_PASS}
+                - DB_NAME=\${DB_NAME}
+                - DB_HOST=db
+                - DJANGO_SECRET_KEY=\${DJANGO_SECRET_KEY}
+              depends_on:
+                - db
+
+            db:
+              image: postgres:14
+              container_name: pokedex-db
+              restart: always
+              volumes:
+                - postgres_data:/var/lib/postgresql/data/
+              environment:
+                - POSTGRES_USER=\${DB_USER}
+                - POSTGRES_PASSWORD=\${DB_PASS}
+                - POSTGRES_DB=\${DB_NAME}
+
+          volumes:
+            postgres_data:
+          EOYAML
+
+          echo "Contents of docker-compose.yml:"
+          cat docker-compose.yml
+
+          # Stop any existing containers
+          echo "Stopping any existing containers..."
+          sudo docker-compose down || echo "No containers to stop"
+
+          # Pull images explicitly
+          echo "Pulling images explicitly..."
+          sudo docker pull ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
+          sudo docker pull ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
+          sudo docker pull postgres:14
+
+          # Show pulled images
+          echo "Available images:"
+          sudo docker images
+
+          # Run docker-compose
+          echo "Starting containers..."
+          export DOCKER_CLIENT_TIMEOUT=120
+          export COMPOSE_HTTP_TIMEOUT=120
+          sudo -E docker-compose up -d --force-recreate
+
+          # Check if containers are running
+          echo "Container status:"
+          sudo docker-compose ps
+          sudo docker ps -a
+
+          # Show container logs
+          echo "Frontend container logs:"
+          sudo docker logs pokedex-frontend || echo "No frontend logs available"
+
+          echo "Backend container logs:"
+          sudo docker logs pokedex-backend || echo "No backend logs available"
+
+          echo "Database container logs:"
+          sudo docker logs pokedex-db || echo "No database logs available"
+
+          # Check for Docker errors
+          echo "Docker daemon logs:"
+          sudo journalctl -u docker --no-pager | tail -n 30
+
+          echo "===== DEPLOYMENT DEBUG SCRIPT END ====="
           EOF
+
+          # Make script executable
+          chmod +x deploy-debug.sh
+
+          # Copy script to server
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./deploy-debug.sh ubuntu@$INSTANCE_IP:~/deploy-debug.sh
+
+          # Run script on server with environment variables
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "DOCKER_HUB_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' DOCKER_HUB_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' DB_USER='${{ secrets.DB_USER || 'admin' }}' DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' bash ~/deploy-debug.sh"
+
+          # Verify application is running by checking port 80 and 3000
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'Checking if services are listening:' && sudo netstat -tulpn | grep -E ':(80|3000)'"
 
   # 4. Health Check
   health-check:
