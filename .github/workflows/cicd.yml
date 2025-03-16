@@ -361,195 +361,230 @@ jobs:
           echo "Waiting for instance to initialize..."
           sleep 60
 
+      - name: Update Django settings for CORS
+        run: |
+          # Create a patch for settings.py to fix CORS issues
+          cat > cors_settings.patch << 'EOF'
+          # CORS settings
+          CORS_ALLOWED_ORIGINS = [
+              "http://localhost:5174",
+              "http://127.0.0.1:5174", 
+              "http://localhost",
+              "http://127.0.0.1",
+              "http://frontend",
+          ]
+
+          # Allow all origins for deployment flexibility with changing IPs
+          CORS_ALLOW_ALL_ORIGINS = True
+
+          # Allow credentials such as cookies and authentication headers
+          CORS_ALLOW_CREDENTIALS = True
+
+          # Specify allowed HTTP methods
+          CORS_ALLOW_METHODS = [
+              "DELETE",
+              "GET",
+              "OPTIONS",
+              "PATCH",
+              "POST",
+              "PUT",
+          ]
+
+          # Specify allowed HTTP headers
+          CORS_ALLOW_HEADERS = [
+              "accept",
+              "accept-encoding",
+              "authorization",
+              "content-type", 
+              "dnt",
+              "origin",
+              "user-agent",
+              "x-csrftoken",
+              "x-requested-with",
+          ]
+          EOF
+
       - name: Copy configuration files
         run: |
           # Create directory structure first
           ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "mkdir -p ~/pokedex-app"
 
-          # Then copy files
+          # Copy the updated docker-compose.yml
+          cat > docker-compose.yml << EOF
+          version: '3.8'
+
+          services:
+            # Frontend application
+            frontend:
+              image: \${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
+              ports:
+                - '80:80'
+              depends_on:
+                - backend
+              environment:
+                # Use the EC2 instance's public IP for API URL
+                - VITE_API_BASE_URL=http://\${SERVER_IP}:3000
+              restart: unless-stopped
+              networks:
+                - app-network
+
+            # Backend API service
+            backend:
+              image: \${DOCKER_HUB_USERNAME}/pokedex-backend:latest
+              ports:
+                - '3000:3000'
+              depends_on:
+                db:
+                  condition: service_healthy
+              environment:
+                - DEBUG=False
+                - SECRET_KEY=\${DJANGO_SECRET_KEY}
+                - DB_HOST=db
+                - DB_PORT=5432
+                - DB_USER=\${DB_USER}
+                - DB_PASS=\${DB_PASS}
+                - DB_NAME=\${DB_NAME}
+                # Add SERVER_IP environment variable for Django to use in CORS settings
+                - SERVER_IP=\${SERVER_IP}
+                # Enable CORS to fix API communication
+                - CORS_ALLOW_ALL_ORIGINS=True
+                - CORS_ALLOW_CREDENTIALS=True
+              restart: unless-stopped
+              networks:
+                - app-network
+
+            # Database service
+            db:
+              image: postgres:15-alpine
+              volumes:
+                - db-data:/var/lib/postgresql/data
+              environment:
+                - POSTGRES_USER=\${DB_USER}
+                - POSTGRES_PASSWORD=\${DB_PASS}
+                - POSTGRES_DB=\${DB_NAME}
+              restart: unless-stopped
+              networks:
+                - app-network
+              healthcheck:
+                test: ['CMD-SHELL', 'pg_isready -U \${DB_USER}']
+                interval: 10s
+                timeout: 5s
+                retries: 5
+
+          networks:
+            app-network:
+              driver: bridge
+
+          volumes:
+            db-data:
+              driver: local
+          EOF
+
+          # Copy the files to the server
           scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./docker-compose.yml ubuntu@$INSTANCE_IP:~/pokedex-app/
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./cors_settings.patch ubuntu@$INSTANCE_IP:~/pokedex-app/
 
           # Copy nginx.conf to the server if it exists
           scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./frontend/nginx.conf ubuntu@$INSTANCE_IP:~/pokedex-app/ || echo "nginx.conf not found, skipping"
 
       - name: Deploy with Docker Compose
         run: |
-          # Create a simplified deployment script
-          cat > deploy-docker.sh << 'EOF'
-          #!/bin/bash
-          set -e  # Exit on any error
-
-          echo "========== DOCKER DEPLOYMENT START =========="
-          echo "Running as user: $(whoami)"
-
-          # Create app directory
-          mkdir -p ~/pokedex-app
-          cd ~/pokedex-app
-          echo "Working directory: $(pwd)"
-
-          # Get server IP
-          SERVER_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-          echo "Server IP: $SERVER_IP"
-
-          # Function to wait for apt to be available
-          wait_for_apt() {
-            echo "Waiting for apt to be available..."
-            # Wait for any running apt processes to finish
-            while ps aux | grep -i apt | grep -v grep > /dev/null; do
-              echo "Apt process is running. Waiting..."
-              sleep 10
-            done
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP << EOF
+            # Create app directory if it doesn't exist
+            mkdir -p ~/pokedex-app
+            cd ~/pokedex-app
             
-            # Remove lock files if they exist
-            sudo rm -f /var/lib/apt/lists/lock
-            sudo rm -f /var/lib/dpkg/lock
-            sudo rm -f /var/lib/dpkg/lock-frontend
-            sudo rm -f /var/cache/apt/archives/lock
+            # Get the server's public IP address and export it for docker-compose
+            SERVER_IP=\$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+            export SERVER_IP
+            echo "Server IP: \${SERVER_IP}"
             
-            echo "Apt should be available now"
-          }
-
-          # Install Docker using snap instead of apt
-          install_docker() {
-            echo "Installing Docker using snap..."
-            sudo snap install docker
+            # Create .env file with environment variables
+            cat > .env << EOT
+            DB_USER=${{ secrets.DB_USER || 'admin' }}
+            DB_PASS=${{ secrets.DB_PASS || 'your_db_password' }}
+            DB_NAME=${{ secrets.DB_NAME || 'pokedex_db' }}
+            API_URL=http://\${SERVER_IP}:3000
+            DJANGO_SECRET_KEY=${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-8aflf8_(qc+ayi87@xam^u=y9b^w0%_=-3ep3ekz(qy06(2)4_' }}
+            NODE_ENV=production
+            DOCKER_HUB_USERNAME=${{ secrets.DOCKER_HUB_USERNAME }}
+            SERVER_IP=\${SERVER_IP}
+            EOT
             
-            # Add current user to docker group
-            sudo addgroup --system docker || true
-            sudo adduser $USER docker || true
+            # Ensure Docker is running
+            if ! command -v docker &> /dev/null; then
+              echo 'Docker not found, installing...'
+              sudo snap install docker
+            fi
             
-            # Wait for snap installation to complete
+            # Make sure user has permission to run docker
+            sudo usermod -aG docker \$USER
+            
+            # Login to Docker Hub to prevent rate limiting
+            echo "${{ secrets.DOCKER_HUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
+            
+            # Pull images
+            sudo docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+            sudo docker pull ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+            sudo docker pull postgres:15-alpine
+            
+            # Stop any existing containers
+            sudo docker-compose down || echo "No containers to stop"
+            
+            # Start containers with SERVER_IP environment variable available
+            sudo -E docker-compose up -d --force-recreate
+            
+            # Check if containers are running
+            echo 'Container status:'
+            sudo docker ps -a
+            
+            # Create a script to update Django settings inside the container
+            cat > update_django.sh << EOSCRIPT
+            #!/bin/bash
+            # Wait for backend container to be fully up
             sleep 10
             
-            # Verify Docker installation
-            which docker || echo "Docker binary not found in PATH"
-            sudo docker --version || echo "Docker command failed"
-          }
-
-          # If Docker is not installed, install it
-          if ! command -v docker &> /dev/null; then
-            wait_for_apt
-            install_docker
-          else
-            echo "Docker is already installed: $(docker --version)"
-          fi
-
-          # Set up docker-compose
-          echo "Setting up docker-compose..."
-          if ! command -v docker-compose &> /dev/null; then
-            # Create docker-compose wrapper script
-            sudo tee /usr/local/bin/docker-compose > /dev/null << 'DCSCRIPT'
-          #!/bin/bash
-          sudo docker compose "$@"
-          DCSCRIPT
-            sudo chmod +x /usr/local/bin/docker-compose
-          fi
-
-          # Create environment file
-          echo "Creating .env file..."
-          cat > .env << ENVFILE
-          DB_USER=$DB_USER
-          DB_PASS=$DB_PASS
-          DB_NAME=$DB_NAME
-          API_URL=http://${SERVER_IP}:3000
-          DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
-          NODE_ENV=production
-          DOCKER_HUB_USERNAME=$DOCKER_USERNAME
-          ENVFILE
-
-          echo "Contents of .env file:"
-          cat .env
-
-          # Create docker-compose.yml file
-          echo "Creating docker-compose.yml..."
-          cat > docker-compose.yml << DCFILE
-          version: '3'
-
-          services:
-            frontend:
-              image: ${DOCKER_USERNAME}/pokedex-frontend:latest
-              restart: always
-              ports:
-                - "80:80"
-              depends_on:
-                - backend
-
-            backend:
-              image: ${DOCKER_USERNAME}/pokedex-backend:latest
-              restart: always
-              ports:
-                - "3000:3000"
-              depends_on:
-                - db
-              environment:
-                - DB_HOST=db
-                - DB_USER=${DB_USER}
-                - DB_PASS=${DB_PASS}
-                - DB_NAME=${DB_NAME}
-                - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-
-            db:
-              image: postgres:14
-              restart: always
-              volumes:
-                - postgres_data:/var/lib/postgresql/data
-              environment:
-                - POSTGRES_USER=${DB_USER}
-                - POSTGRES_PASSWORD=${DB_PASS}
-                - POSTGRES_DB=${DB_NAME}
-
-          volumes:
-            postgres_data:
-          DCFILE
-
-          echo "Contents of docker-compose.yml:"
-          cat docker-compose.yml
-
-          # Login to Docker Hub
-          echo "Logging into Docker Hub..."
-          echo "$DOCKER_TOKEN" | sudo docker login -u "$DOCKER_USERNAME" --password-stdin
-
-          # Stop any existing containers
-          echo "Stopping any existing containers..."
-          sudo docker-compose down || true
-
-          # Pull images directly (bypass docker-compose pull)
-          echo "Pulling images..."
-          sudo docker pull ${DOCKER_USERNAME}/pokedex-frontend:latest || {
-            echo "Failed to pull frontend image. Checking Docker Hub login status..."
-            sudo docker login --username "$DOCKER_USERNAME"
-          }
-          sudo docker pull ${DOCKER_USERNAME}/pokedex-backend:latest
-          sudo docker pull postgres:14
-
-          # Start containers
-          echo "Starting containers..."
-          sudo docker-compose up -d --force-recreate
-
-          # Check if containers are running
-          echo "Checking containers status:"
-          sudo docker ps -a
-
-          # Check services
-          echo "Checking if services are running:"
-          sleep 10  # Give containers time to start
-          curl -s -I http://localhost:80 || echo "Frontend not accessible yet"
-          curl -s -I http://localhost:3000 || echo "Backend not accessible yet"
-
-          echo "========== DOCKER DEPLOYMENT END =========="
+            # Find the container ID of the backend
+            BACKEND_CONTAINER=\$(docker ps | grep pokedex-backend | awk '{print \$1}')
+            
+            if [ -n "\$BACKEND_CONTAINER" ]; then
+              echo "Updating Django settings in container \$BACKEND_CONTAINER"
+              
+              # Copy CORS settings into the container
+              docker cp cors_settings.patch \$BACKEND_CONTAINER:/tmp/
+              
+              # Execute a command to update settings
+              docker exec \$BACKEND_CONTAINER bash -c '
+                # Find settings.py
+                SETTINGS_FILE=\$(find /app -name settings.py)
+                if [ -n "\$SETTINGS_FILE" ]; then
+                  echo "Found settings file: \$SETTINGS_FILE"
+                  
+                  # Make a backup
+                  cp \$SETTINGS_FILE \$SETTINGS_FILE.bak
+                  
+                  # Check if CORS settings already exist and remove them
+                  if grep -q "CORS_ALLOWED_ORIGINS" \$SETTINGS_FILE; then
+                    # Remove existing CORS settings
+                    sed -i "/CORS_ALLOWED_ORIGINS/,/CORS_ALLOW_ALL_ORIGINS/d" \$SETTINGS_FILE
+                  fi
+                  
+                  # Add new CORS settings
+                  cat /tmp/cors_settings.patch >> \$SETTINGS_FILE
+                  
+                  echo "Updated Django settings"
+                else
+                  echo "Could not find settings.py file"
+                fi
+              '
+            else
+              echo "Backend container not found"
+            fi
+            EOSCRIPT
+            
+            chmod +x update_django.sh
+            ./update_django.sh
           EOF
-
-          # Make script executable
-          chmod +x deploy-docker.sh
-
-          # Copy script to server
-          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./deploy-docker.sh ubuntu@$INSTANCE_IP:~/deploy-docker.sh
-
-          # Execute script with environment variables
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "DOCKER_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' DOCKER_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' DB_USER='${{ secrets.DB_USER || 'admin' }}' DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' bash ~/deploy-docker.sh"
-
-          # Verify deployment
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'Final status:' && sudo docker ps && echo 'Service ports:' && sudo ss -tulpn | grep -E ':(80|3000)'"
 
   # 4. Health Check
   health-check:
