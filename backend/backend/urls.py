@@ -20,5 +20,6 @@ from django.urls import path, include
 
 urlpatterns = [
     path("admin/", admin.site.urls),
-    path("api/users/", include("users.urls")),
+    # Change this to match the expected path from nginx
+    path("users/", include("users.urls")),
 ]
