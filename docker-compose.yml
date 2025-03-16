@@ -24,13 +24,13 @@ services:
       db:
         condition: service_healthy
     environment:
-      - DEBUG=False
-      - SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DEBUG=True
+      - SECRET_KEY=${DJANGO_SECRET_KEY:-default_dev_key}
       - DB_HOST=db
       - DB_PORT=5432
-      - DB_USER=${DB_USER}
-      - DB_PASS=${DB_PASS}
-      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER:-admin}
+      - DB_PASS=${DB_PASS:-adminpassword}
+      - DB_NAME=${DB_NAME:-pokedex_db}
       # Add SERVER_IP environment variable for Django to use in CORS settings
       - SERVER_IP=${SERVER_IP:-localhost}
     restart: unless-stopped
@@ -43,9 +43,9 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
     environment:
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASS}
-      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USER:-admin}
+      - POSTGRES_PASSWORD=${DB_PASS:-adminpassword}
+      - POSTGRES_DB=${DB_NAME:-pokedex_db}
     restart: unless-stopped
     networks:
       - app-network
@@ -54,6 +54,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
 
 networks:
   app-network:

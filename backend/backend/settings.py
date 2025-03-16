@@ -63,10 +63,23 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5174",
     "http://127.0.0.1:5174",
     "http://localhost:80",
+    "http://127.0.0.1:80",
+    "http://localhost",
     "http://127.0.0.1",
     "http://frontend",
+    "http://frontend:80",
     f"http://{SERVER_IP}",  # Dynamically add the server IP
 ]
+
+# Additional SERVER_IP based origins - dynamically added
+if os.environ.get("SERVER_IP"):
+    CORS_ALLOWED_ORIGINS.extend(
+        [
+            f"http://{os.environ.get('SERVER_IP')}",
+            f"http://{os.environ.get('SERVER_IP')}:80",
+            f"http://{os.environ.get('SERVER_IP')}:3000",
+        ]
+    )
 
 # Specify allowed HTTP methods
 CORS_ALLOW_METHODS = [
@@ -92,6 +105,11 @@ CORS_ALLOW_HEADERS = [
 
 CORS_ALLOW_CREDENTIALS = True
 
+# Add headers in all responses
+CORS_EXPOSE_HEADERS = [
+    "content-type",
+    "content-length",
+]
 
 ROOT_URLCONF = "backend.urls"
 
