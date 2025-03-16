@@ -17,6 +17,10 @@ RUN npm ci
 # Copies the entire frontend source code into /app inside the container
 COPY . ./
 
+# Add environment variable support
+ARG VITE_API_BASE_URL
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+
 # Build the application
 RUN npm run build
 

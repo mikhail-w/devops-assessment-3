@@ -1,7 +1,5 @@
-// Use environment variable or fallback to localhost:3000
-const BACKEND_API_BASE_URL = import.meta.env?.VITE_API_BASE_URL
-  ? `${import.meta.env.VITE_API_BASE_URL}/api`
-  : 'http://localhost:3000/api';
+// Use relative path for API URL to work properly with nginx proxy
+const BACKEND_API_BASE_URL = '/api';
 
 console.log('Using backend API URL:', BACKEND_API_BASE_URL);
 
@@ -136,9 +134,9 @@ const backendApiClient = {
 
       const data = await backendApiClient.handleResponse(response);
       // Store username along with tokens
-      if (data.token) {
+      if (data.access) {
         localStorage.setItem('username', username);
-        localStorage.setItem('token', data.token);
+        localStorage.setItem('token', data.access);
         localStorage.setItem('refresh', data.refresh);
       }
 
