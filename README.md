@@ -55,7 +55,7 @@ Check out the live version of the app
 
 ### Home Page
 
-![Home Page](./src/assets/images/screenshots/home.png)
+![Home Page]()
 
 ### Dark Mode
 
