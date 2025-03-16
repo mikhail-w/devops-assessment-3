@@ -185,74 +185,99 @@ jobs:
       - name: Deploy with Docker Compose
         run: |
           # Create a simplified deployment script
-          cat > deploy-script.sh << 'EOF'
+          cat > deploy-docker.sh << 'EOF'
           #!/bin/bash
           set -e  # Exit on any error
 
-          echo "======= DEPLOYMENT SCRIPT START ======="
-          echo "Running as: $(whoami)"
-          echo "Current directory: $(pwd)"
+          echo "========== DOCKER DEPLOYMENT START =========="
+          echo "Running as user: $(whoami)"
 
           # Create app directory
           mkdir -p ~/pokedex-app
           cd ~/pokedex-app
+          echo "Working directory: $(pwd)"
 
-          # Wait for any apt locks to be released
-          echo "Checking for apt locks..."
-          while sudo lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
-            echo "Waiting for apt lock to be released..."
-            sleep 5
-          done
-
-          # Install Docker if not installed
-          if ! command -v docker &> /dev/null; then
-            echo "Installing Docker..."
-            # First remove any partial installations
-            sudo rm -f /var/lib/dpkg/lock-frontend
-            sudo rm -f /var/lib/apt/lists/lock
-            sudo rm -f /var/cache/apt/archives/lock
-            sudo rm -f /var/lib/dpkg/lock
-            
-            # Update and install
-            sudo apt-get update
-            sudo apt-get install -y apt-transport-https ca-certificates curl software-properties-common
-            
-            # Add Docker repository
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key add -
-            sudo add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
-            
-            # Install Docker
-            sudo apt-get update
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io
-          fi
-
-          # Add current user to docker group
-          sudo usermod -aG docker $USER
-
-          # Install Docker Compose if not installed
-          if ! command -v docker-compose &> /dev/null; then
-            echo "Installing Docker Compose..."
-            sudo curl -L "https://github.com/docker/compose/releases/download/v2.20.0/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
-            sudo chmod +x /usr/local/bin/docker-compose
-          fi
-
-          # Make sure Docker is running
-          echo "Ensuring Docker service is running..."
-          sudo systemctl start docker
-          sudo systemctl enable docker
-
-          # Get the server's public IP
+          # Get server IP
           SERVER_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
           echo "Server IP: $SERVER_IP"
 
+          # Function to wait for apt to be available
+          wait_for_apt() {
+            echo "Waiting for apt to be available..."
+            # Wait for any running apt processes to finish
+            while ps aux | grep -i apt | grep -v grep > /dev/null; do
+              echo "Apt process is running. Waiting..."
+              sleep 10
+            done
+            
+            # Remove lock files if they exist
+            sudo rm -f /var/lib/apt/lists/lock
+            sudo rm -f /var/lib/dpkg/lock
+            sudo rm -f /var/lib/dpkg/lock-frontend
+            sudo rm -f /var/cache/apt/archives/lock
+            
+            echo "Apt should be available now"
+          }
+
+          # Install Docker using snap instead of apt
+          install_docker() {
+            echo "Installing Docker using snap..."
+            sudo snap install docker
+            
+            # Add current user to docker group
+            sudo addgroup --system docker || true
+            sudo adduser $USER docker || true
+            
+            # Wait for snap installation to complete
+            sleep 10
+            
+            # Verify Docker installation
+            which docker || echo "Docker binary not found in PATH"
+            sudo docker --version || echo "Docker command failed"
+          }
+
+          # If Docker is not installed, install it
+          if ! command -v docker &> /dev/null; then
+            wait_for_apt
+            install_docker
+          else
+            echo "Docker is already installed: $(docker --version)"
+          fi
+
+          # Set up docker-compose
+          echo "Setting up docker-compose..."
+          if ! command -v docker-compose &> /dev/null; then
+            # Create docker-compose wrapper script
+            sudo tee /usr/local/bin/docker-compose > /dev/null << 'DCSCRIPT'
+          #!/bin/bash
+          sudo docker compose "$@"
+          DCSCRIPT
+            sudo chmod +x /usr/local/bin/docker-compose
+          fi
+
+          # Create environment file
+          echo "Creating .env file..."
+          cat > .env << ENVFILE
+          DB_USER=$DB_USER
+          DB_PASS=$DB_PASS
+          DB_NAME=$DB_NAME
+          API_URL=http://${SERVER_IP}:3000
+          DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
+          NODE_ENV=production
+          DOCKER_HUB_USERNAME=$DOCKER_USERNAME
+          ENVFILE
+
+          echo "Contents of .env file:"
+          cat .env
+
           # Create docker-compose.yml file
           echo "Creating docker-compose.yml..."
-          cat > docker-compose.yml << EOY
+          cat > docker-compose.yml << DCFILE
           version: '3'
 
           services:
             frontend:
-              image: $DOCKER_USERNAME/pokedex-frontend:latest
+              image: ${DOCKER_USERNAME}/pokedex-frontend:latest
               restart: always
               ports:
                 - "80:80"
@@ -260,7 +285,7 @@ jobs:
                 - backend
 
             backend:
-              image: $DOCKER_USERNAME/pokedex-backend:latest
+              image: ${DOCKER_USERNAME}/pokedex-backend:latest
               restart: always
               ports:
                 - "3000:3000"
@@ -268,10 +293,10 @@ jobs:
                 - db
               environment:
                 - DB_HOST=db
-                - DB_USER=$DB_USER
-                - DB_PASS=$DB_PASS
-                - DB_NAME=$DB_NAME
-                - DJANGO_SECRET_KEY=$DJANGO_SECRET_KEY
+                - DB_USER=${DB_USER}
+                - DB_PASS=${DB_PASS}
+                - DB_NAME=${DB_NAME}
+                - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
 
             db:
               image: postgres:14
@@ -279,61 +304,62 @@ jobs:
               volumes:
                 - postgres_data:/var/lib/postgresql/data
               environment:
-                - POSTGRES_USER=$DB_USER
-                - POSTGRES_PASSWORD=$DB_PASS
-                - POSTGRES_DB=$DB_NAME
+                - POSTGRES_USER=${DB_USER}
+                - POSTGRES_PASSWORD=${DB_PASS}
+                - POSTGRES_DB=${DB_NAME}
 
           volumes:
             postgres_data:
-          EOY
+          DCFILE
 
           echo "Contents of docker-compose.yml:"
           cat docker-compose.yml
 
           # Login to Docker Hub
           echo "Logging into Docker Hub..."
-          echo "$DOCKER_TOKEN" | docker login -u "$DOCKER_USERNAME" --password-stdin || {
-            echo "Failed to log in to Docker Hub, trying with sudo..."
-            echo "$DOCKER_TOKEN" | sudo docker login -u "$DOCKER_USERNAME" --password-stdin
-          }
+          echo "$DOCKER_TOKEN" | sudo docker login -u "$DOCKER_USERNAME" --password-stdin
 
-          # Stop and remove any existing containers
+          # Stop any existing containers
           echo "Stopping any existing containers..."
-          sudo docker-compose down || echo "No containers to stop"
+          sudo docker-compose down || true
 
-          # Clean up any old containers and images
-          echo "Cleaning up old containers and images..."
-          sudo docker system prune -f
-
-          # Pull images manually
+          # Pull images directly (bypass docker-compose pull)
           echo "Pulling images..."
-          sudo docker pull $DOCKER_USERNAME/pokedex-frontend:latest
-          sudo docker pull $DOCKER_USERNAME/pokedex-backend:latest
+          sudo docker pull ${DOCKER_USERNAME}/pokedex-frontend:latest || {
+            echo "Failed to pull frontend image. Checking Docker Hub login status..."
+            sudo docker login --username "$DOCKER_USERNAME"
+          }
+          sudo docker pull ${DOCKER_USERNAME}/pokedex-backend:latest
           sudo docker pull postgres:14
 
           # Start containers
           echo "Starting containers..."
           sudo docker-compose up -d --force-recreate
 
-          # Check containers
-          echo "Container status:"
+          # Check if containers are running
+          echo "Checking containers status:"
           sudo docker ps -a
 
-          echo "======= DEPLOYMENT SCRIPT END ======="
+          # Check services
+          echo "Checking if services are running:"
+          sleep 10  # Give containers time to start
+          curl -s -I http://localhost:80 || echo "Frontend not accessible yet"
+          curl -s -I http://localhost:3000 || echo "Backend not accessible yet"
+
+          echo "========== DOCKER DEPLOYMENT END =========="
           EOF
 
           # Make script executable
-          chmod +x deploy-script.sh
+          chmod +x deploy-docker.sh
 
-          # Copy the script to the server
-          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./deploy-script.sh ubuntu@$INSTANCE_IP:~/deploy-script.sh
+          # Copy script to server
+          scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./deploy-docker.sh ubuntu@$INSTANCE_IP:~/deploy-docker.sh
 
-          # Execute the script with required environment variables
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "DOCKER_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' DOCKER_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' DB_USER='${{ secrets.DB_USER || 'admin' }}' DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' bash ~/deploy-script.sh"
+          # Execute script with environment variables
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "DOCKER_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' DOCKER_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' DB_USER='${{ secrets.DB_USER || 'admin' }}' DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' bash ~/deploy-docker.sh"
 
           # Verify deployment
-          echo "Verifying deployment..."
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "docker ps && echo 'Service ports:' && sudo netstat -tulpn | grep -E ':(80|3000)'"
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'Final status:' && sudo docker ps && echo 'Service ports:' && sudo ss -tulpn | grep -E ':(80|3000)'"
   # 4. Health Check
   health-check:
     name: Health Check
