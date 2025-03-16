@@ -239,13 +239,71 @@ jobs:
               exit 1
             fi
             
+            # Display docker-compose.yml content
+            echo "Contents of docker-compose.yml:"
+            cat docker-compose.yml
+            
+            # Fix permissions and create explicit docker-compose.yml with images
+            echo "Creating explicit docker-compose with correct image references..."
+            cat > docker-compose.yml << EOYAML
+            version: '3.8'
+
+            services:
+              frontend:
+                image: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+                container_name: pokedex-frontend
+                restart: always
+                ports:
+                  - "80:80"
+                depends_on:
+                  - backend
+                environment:
+                  - API_URL=\${API_URL}
+                  - NODE_ENV=\${NODE_ENV}
+
+              backend:
+                image: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+                container_name: pokedex-backend
+                restart: always
+                ports:
+                  - "3000:3000"
+                environment:
+                  - DB_USER=\${DB_USER}
+                  - DB_PASS=\${DB_PASS}
+                  - DB_NAME=\${DB_NAME}
+                  - DB_HOST=db
+                  - DJANGO_SECRET_KEY=\${DJANGO_SECRET_KEY}
+
+              db:
+                image: postgres:14
+                container_name: pokedex-db
+                restart: always
+                volumes:
+                  - postgres_data:/var/lib/postgresql/data/
+                environment:
+                  - POSTGRES_USER=\${DB_USER}
+                  - POSTGRES_PASSWORD=\${DB_PASS}
+                  - POSTGRES_DB=\${DB_NAME}
+
+            volumes:
+              postgres_data:
+            EOYAML
+            
+            # Make sure user has permission to run docker-compose
+            sudo usermod -aG docker \$USER
+            newgrp docker || true
+            
             # Stop any existing containers to avoid conflicts
             echo 'Stopping any existing containers...'
-            sudo docker-compose down || true
+            sudo docker-compose down || echo "No containers to stop"
+            
+            # Login to DockerHub to prevent rate limiting and ensure access to private images
+            echo "Logging into Docker Hub"
+            echo "${{ secrets.DOCKER_HUB_TOKEN }}" | sudo docker login -u "${{ secrets.DOCKER_HUB_USERNAME }}" --password-stdin
             
             # Pull latest images
             echo 'Pulling latest images...'
-            sudo docker-compose pull
+            sudo docker-compose pull || (echo "Error pulling images, checking for errors:" && sudo docker-compose config)
             
             # Start containers with force-recreate to ensure fresh start
             echo 'Starting containers...'
@@ -254,10 +312,18 @@ jobs:
             # Check if containers are running
             echo 'Container status:'
             sudo docker-compose ps
+            sudo docker ps -a
             
             # Show logs for troubleshooting
-            echo 'Container logs:'
-            sudo docker-compose logs --tail=20
+            echo 'Container logs (frontend):'
+            sudo docker-compose logs --tail=20 frontend || echo "No frontend logs available"
+            
+            echo 'Container logs (backend):'
+            sudo docker-compose logs --tail=20 backend || echo "No backend logs available"
+            
+            # Check for any Docker errors
+            echo 'Checking Docker daemon logs for errors:'
+            sudo journalctl -u docker --no-pager | tail -n 50
             
             # Clean up old images
             echo 'Cleaning up old images...'
