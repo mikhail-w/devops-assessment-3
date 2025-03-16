@@ -149,6 +149,90 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
+      # Clean up existing resources
+      - name: Clean up existing Terraform resources
+        run: |
+          echo "Starting complete cleanup of Terraform resources..."
+
+          # Create a targeted destroy script to ensure proper dependency order
+          cat > cleanup.sh << 'EOF'
+          #!/bin/bash
+          set -e
+
+          echo "=== TERRAFORM CLEANUP SCRIPT ==="
+
+          # First identify resources to ensure they exist before attempting to destroy
+          echo "Identifying existing resources..."
+
+          # Get the app_name from terraform.tfvars or use default
+          APP_NAME=$(grep -o 'app_name.*=.*".*"' terraform.tfvars | cut -d'"' -f2 || echo "pokedex-app")
+          echo "Using app name: $APP_NAME"
+
+          # Step 1: Destroy EC2 instances first (they depend on other resources)
+          echo "Destroying EC2 instances..."
+          INSTANCE_IDS=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=$APP_NAME" --query "Reservations[].Instances[].InstanceId" --output text)
+          if [ -n "$INSTANCE_IDS" ]; then
+            echo "Found instances to destroy: $INSTANCE_IDS"
+            for ID in $INSTANCE_IDS; do
+              aws ec2 terminate-instances --instance-ids $ID
+              echo "Waiting for instance $ID to terminate..."
+              aws ec2 wait instance-terminated --instance-ids $ID
+            done
+          else
+            echo "No EC2 instances found"
+          fi
+
+          # Step 2: Release Elastic IPs
+          echo "Releasing Elastic IPs..."
+          ALLOCATION_IDS=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=$APP_NAME" --query "Addresses[].AllocationId" --output text || aws ec2 describe-addresses --query "Addresses[].AllocationId" --output text)
+          if [ -n "$ALLOCATION_IDS" ]; then
+            echo "Found Elastic IPs to release: $ALLOCATION_IDS"
+            for ID in $ALLOCATION_IDS; do
+              aws ec2 release-address --allocation-id $ID
+            done
+          else
+            echo "No Elastic IPs found"
+          fi
+
+          # Step 3: Delete security groups
+          echo "Deleting security groups..."
+          SG_IDS=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=$APP_NAME-sg" --query "SecurityGroups[].GroupId" --output text)
+          if [ -n "$SG_IDS" ]; then
+            echo "Found security groups to delete: $SG_IDS"
+            for ID in $SG_IDS; do
+              # First remove all ingress and egress rules to avoid dependency issues
+              aws ec2 revoke-security-group-ingress --group-id $ID --ip-permissions "$(aws ec2 describe-security-groups --group-ids $ID --query "SecurityGroups[0].IpPermissions" --output json)" || echo "No ingress rules to revoke"
+              aws ec2 revoke-security-group-egress --group-id $ID --ip-permissions "$(aws ec2 describe-security-groups --group-ids $ID --query "SecurityGroups[0].IpPermissionsEgress" --output json)" || echo "No egress rules to revoke"
+              sleep 5
+              aws ec2 delete-security-group --group-id $ID
+            done
+          else
+            echo "No security groups found"
+          fi
+
+          # Step 4: Delete key pairs
+          echo "Deleting key pairs..."
+          KEY_PAIRS=$(aws ec2 describe-key-pairs --filters "Name=key-name,Values=$APP_NAME-key" --query "KeyPairs[].KeyName" --output text)
+          if [ -n "$KEY_PAIRS" ]; then
+            echo "Found key pairs to delete: $KEY_PAIRS"
+            for KEY in $KEY_PAIRS; do
+              aws ec2 delete-key-pair --key-name $KEY
+            done
+          else
+            echo "No key pairs found"
+          fi
+
+          echo "Resource cleanup completed successfully!"
+          EOF
+
+          # Make the script executable
+          chmod +x cleanup.sh
+
+          # Run the cleanup script
+          ./cleanup.sh
+
+          echo "Cleanup completed. Terraform state should now be clean."
+
       - name: Terraform Apply
         run: terraform apply -auto-approve
 
@@ -360,6 +444,7 @@ jobs:
 
           # Verify deployment
           ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'Final status:' && sudo docker ps && echo 'Service ports:' && sudo ss -tulpn | grep -E ':(80|3000)'"
+
   # 4. Health Check
   health-check:
     name: Health Check
