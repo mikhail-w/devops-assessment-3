@@ -1,9 +1,16 @@
-# Pokédex Application
+# Dev-Ops Assessment III
 
-A full-stack Pokémon application that allows users to browse Pokémon, create
-teams, and play the pokeflip memory game. Built with a React frontend, Django
-backend, PostgreSQL database, and deployed using a CI/CD pipeline with GitHub
-Actions and AWS.
+This Pokédex application demonstrates a comprehensive implementation of
+Continuous Integration and Continuous Deployment (CI/CD) principles utilizing
+containerization and automation through GitHub Actions. The project successfully
+automates the deployment of a three-tier application stack through a
+well-structured CI/CD pipeline. The stack includes a React frontend with Nginx
+web server, a Django backend API, and a PostgreSQL database, all containerized
+using Docker and orchestrated with Docker Compose. The pipeline manages secrets
+and environment variables across multiple environments, builds and deploys
+containerized instances of each application component, and automates the
+delivery process using GitHub Actions workflows, resulting in a deployment that
+requires minimal manual intervention.
 
 <p align="center"style="margin-top: 30px;">
   <img src="./frontend/src/assets/images/pokemon/pokedex.png" alt="Pokedex Logo">
@@ -36,41 +43,9 @@ Compose.
 
 ### System Architecture Diagram
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                                  AWS Cloud                                  │
-│                                                                             │
-│  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │                           EC2 Instance (t2.micro)                    │   │
-│  │                                                                      │   │
-│  │  ┌────────────────────────────────────────────────────────────────┐  │   │
-│  │  │                     Docker Compose Environment                 │  │   │
-│  │  │                                                                │  │   │
-│  │  │  ┌──────────────┐      ┌──────────────┐      ┌──────────────┐  │  │   │
-│  │  │  │   Frontend   │      │    Backend   │      │   Database   │  │  │   │
-│  │  │  │              │      │              │      │              │  │  │   │
-│  │  │  │  ┌────────┐  │      │  ┌────────┐  │      │  ┌────────┐  │  │  │   │
-│  │  │  │  │ React  │  │      │  │ Django │  │      │  │PostgreSQL │  │  │   │
-│  │  │  │  └────────┘  │      │  └────────┘  │      │  └────────┘  │  │  │   │
-│  │  │  │  ┌────────┐  │      │  ┌────────┐  │      │  ┌────────┐  │  │  │   │
-│  │  │  │  │ Nginx  │  │      │  │REST API│  │      │  │Persistent │  │  │   │
-│  │  │  │  └────────┘  │      │  └────────┘  │      │  │ Volume    │  │  │   │
-│  │  │  │              │      │              │      │              │  │  │   │
-│  │  │  │    Port 80   │ <--> │   Port 3000  │ <--> │   Port 5432  │  │  │   │
-│  │  │  └──────────────┘      └──────────────┘      └──────────────┘  │  │   │
-│  │  │                                                                │  │   │
-│  │  │                      Docker Network                            │  │   │
-│  │  └────────────────────────────────────────────────────────────────┘  │   │
-│  └──────────────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                      ▲
-                                      │
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────────┐
-│                                  External API                                  │
-│                                    PokeAPI                                     │
-└────────────────────────────────────────────────────────────────────────────────┘
-```
+<p align="center"style="margin-top: 30px;">
+  <img src="./frontend/src/assets/images/pokedex-architecture-diagram.png" alt="Pokedex Logo">
+</p>
 
 ## 🚀 CI/CD Pipeline
 
@@ -84,32 +59,9 @@ The project implements a complete CI/CD pipeline using GitHub Actions:
 
 ### CI/CD Pipeline Workflow
 
-```
-┌─────────────────┐     ┌───────────────────────────────────────────────────────┐    ┌────────────────────────────┐
-│   Developer     │     │                GitHub Actions Pipeline                │    │      AWS Environment       │
-│   Environment   │     │                                                       │    │                            │
-│                 │     │  ┌────────┐   ┌────────┐   ┌─────────┐   ┌─────────┐  │    │  ┌─────────────────────┐   │
-│ ┌───────────┐   │     │  │        │   │        │   │         │   │         │  │    │  │                     │   │
-│ │ Developer │ ──┼────►│  │  Test  │──►│  Build │──►│ Deploy  │──►│ Health  │  │    │  │  EC2 Instance with  │   │
-│ └───────────┘   │     │  │ Stage  │   │ Stage  │   │ Stage   │   │ Check   │  │    │  │  Docker Containers  │   │
-│                 │     │  │        │   │        │   │         │   │         │  │    │  │                     │   │
-│ ┌───────────┐   │     │  └────────┘   └────────┘   └─────────┘   └─────────┘  │    │  └─────────────────────┘   │
-│ │    Git    │ ◄─┼─────┼───────────────────────────────┐                       │    │                            │
-│ │Repository │   │     │                               │                       │    │                            │
-│ └───────────┘   │     │                               ▼                       │    │                            │
-└─────────────────┘     └───────────────────────────────────────────────────────┘    └────────────────────────────┘
-                                                     │
-                                                     │
-                                       ┌─────────────▼────────────┐
-                                       │     External Services    │
-                                       │      - Docker Hub        │
-                                       │      - AWS Services      │
-                                       └──────────────────────────┘
-```
-
-## Aplication Architecture Diagram
-
-<img src="./frontend/src/assets/images/application_architecture.png">
+<p align="center"style="margin-top: 30px;">
+  <img src="./frontend/src/assets/images/POKEDEX-CICD.png" alt="Pokedex Logo">
+</p>
 
 ## 📊 Technical Stack
 
@@ -587,58 +539,3 @@ The application uses three Docker containers orchestrated with Docker Compose:
 #### Pokémon Data
 
 - External API calls to PokeAPI for Pokémon information
-
-### Troubleshooting
-
-#### Common Issues
-
-1. **Container Not Starting**:
-
-   - Check Docker logs: `docker-compose logs [service_name]`
-   - Verify environment variables are set correctly
-
-2. **Frontend Not Loading**:
-
-   - Check Nginx configuration and logs
-   - Ensure API URL is correctly set
-
-3. **Backend API Connection Issues**:
-
-   - Verify CORS settings in Django
-   - Check network configuration and security groups
-
-4. **Database Connection Issues**:
-   - Verify database credentials
-   - Check if PostgreSQL container is running
-
-### Maintenance
-
-#### Updating the Application
-
-1. Make changes to your code
-2. Push to the main branch
-3. The CI/CD pipeline will automatically deploy the updates
-
-#### Database Backup and Restore
-
-1. Database backup:
-
-   ```bash
-   docker exec -t db pg_dump -U [username] -d [database] > backup.sql
-   ```
-
-2. Database restore:
-   ```bash
-   cat backup.sql | docker exec -i db psql -U [username] -d [database]
-   ```
-
-### Security Considerations
-
-- JWT tokens are used for authentication
-- Database credentials are stored as GitHub secrets
-- HTTPS should be enabled in production (currently using HTTP)
-- AWS security groups restrict access to necessary ports only
-
-## 📝 License
-
-[MIT License](LICENSE)
