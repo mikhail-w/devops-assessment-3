@@ -21,7 +21,7 @@ resulting in a deployment that requires minimal manual intervention.
 
 <!-- Visit the live application at: [here](https://d18sty0dsu44el.cloudfront.net/). -->
 
-Visit the live application at: [here](http://http://52.87.68.42/).
+Visit the live application at: [here](http://52.87.68.42/).
 
 ## 🌟 Features
 
