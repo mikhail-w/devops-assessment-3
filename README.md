@@ -1,4 +1,4 @@
-# Dev-Ops Assessment III
+# DevOps Assessment III: Pokédex CI/CD Implementation
 
 This Pokédex application demonstrates a comprehensive implementation of
 Continuous Integration and Continuous Deployment (CI/CD) principles utilizing
@@ -6,13 +6,14 @@ containerization and automation through GitHub Actions. The project successfully
 automates the deployment of a three-tier application stack through a
 well-structured CI/CD pipeline. The stack includes a React frontend with Nginx
 web server, a Django backend API, and a PostgreSQL database, all containerized
-using Docker and orchestrated with Docker Compose. The pipeline manages secrets
-and environment variables across multiple environments, builds and deploys
-containerized instances of each application component, and automates the
-delivery process using GitHub Actions workflows, resulting in a deployment that
-requires minimal manual intervention.
+using Docker and orchestrated with Docker Compose.
 
-<p align="center"style="margin-top: 30px;">
+The pipeline manages secrets and environment variables across multiple
+environments, builds and deploys containerized instances of each application
+component, and automates the delivery process using GitHub Actions workflows,
+resulting in a deployment that requires minimal manual intervention.
+
+<p align="center" style="margin-top: 30px;">
   <img src="./frontend/src/assets/images/pokemon/pokedex.png" alt="Pokedex Logo">
 </p>
 
@@ -43,48 +44,70 @@ Compose.
 
 ### System Architecture Diagram
 
-<p align="center"style="margin-top: 30px;">
-  <img src="./frontend/src/assets/images/pokedex-architecture-diagram.png" alt="Pokedex Logo">
+<p align="center" style="margin-top: 30px;">
+  <img src="./frontend/src/assets/images/pokedex-architecture-diagram.png" alt="Pokedex Architecture Diagram">
 </p>
 
 ## 🚀 CI/CD Pipeline
 
-The project implements a complete CI/CD pipeline using GitHub Actions:
+The project implements a complete CI/CD pipeline using GitHub Actions with four
+primary stages:
 
 1. **Test**: Automatically runs frontend and backend tests
+
+   - Frontend: React component and unit tests with Vite
+   - Backend: Django unit tests
+
 2. **Build**: Builds Docker images for both frontend and backend
+
+   - Multi-stage builds for optimized images
+   - Caching strategies for faster builds
+   - Pushes images to Docker Hub registry
+
 3. **Deploy**: Provisions AWS infrastructure using Terraform and deploys the
    application
+
+   - Creates EC2 instance with security groups
+   - Sets up networking and SSH access
+   - Deploys containerized application stack
+
 4. **Health Check**: Verifies that the application is running correctly
+   - Tests frontend and backend endpoints
+   - Confirms database connectivity
+   - Validates application functionality
 
 ### CI/CD Pipeline Workflow
 
-<p align="center"style="margin-top: 30px;">
-  <img src="./frontend/src/assets/images/POKEDEX-CICD.png" alt="Pokedex Logo">
+<p align="center" style="margin-top: 30px;">
+  <img src="./frontend/src/assets/images/POKEDEX-CICD.png" alt="CI/CD Pipeline Workflow">
 </p>
 
 ## 📊 Technical Stack
 
 ### Frontend
 
-- React.js
-- Axios for API requests
-- CSS for styling
-- Served via Nginx
+- **Framework**: React.js with Vite
+- **State Management**: React Context API
+- **HTTP Client**: Axios for API requests
+- **Styling**: CSS with Chakra UI components
+- **Web Server**: Nginx for static content serving and API proxying
 
 ### Backend
 
-- Django 5.1.6
-- Django REST Framework 3.15.2
-- JWT Authentication via SimpleJWT
-- PostgreSQL database
+- **Framework**: Django 5.1.6
+- **API**: Django REST Framework 3.15.2
+- **Authentication**: JWT via SimpleJWT
+- **Database ORM**: Django ORM
+- **Database**: PostgreSQL
 
 ### DevOps
 
-- Docker & Docker Compose
-- GitHub Actions
-- Terraform for infrastructure as code
-- AWS EC2 for hosting
+- **Containerization**: Docker & Docker Compose
+- **CI/CD**: GitHub Actions
+- **Infrastructure as Code**: Terraform
+- **Cloud Provider**: AWS (EC2, EIP, Security Groups)
+- **Monitoring**: Server logs with CloudWatch integration
+- **Security**: Environment variables, AWS IAM, Security Groups
 
 ## 🛠️ Local Development Setup
 
@@ -100,7 +123,7 @@ The project implements a complete CI/CD pipeline using GitHub Actions:
 1. Clone the repository:
 
    ```bash
-   https://github.com/mikhail-w/devops-assessment-3.git
+   git clone https://github.com/mikhail-w/devops-assessment-3.git
    cd devops-assessment-3
    ```
 
@@ -120,6 +143,9 @@ The project implements a complete CI/CD pipeline using GitHub Actions:
 
    # Server Configuration
    SERVER_IP=localhost
+
+   # Docker Hub Configuration (for CI/CD)
+   DOCKER_HUB_USERNAME=your-dockerhub-username
    ```
 
 3. Start the application:
@@ -139,127 +165,45 @@ The project implements a complete CI/CD pipeline using GitHub Actions:
    - Backend API: http://localhost:3000
    - Admin Interface: http://localhost:3000/admin
 
-## 📦 Production Deployment
+## 🔧 CI/CD Pipeline In-Depth Documentation
 
-The application is set up for automatic deployment to AWS EC2 using GitHub
-Actions. To deploy:
+### Secret and Environment Variable Management
 
-### GitHub Repository Secrets
+The CI/CD pipeline manages secrets and environment variables across multiple
+environments:
 
-To enable secure CI/CD pipeline deployment, the following secrets must be
-configured in your GitHub repository:
+1. **GitHub Repository Secrets**:
 
-1. **AWS Configuration**:
+   - AWS credentials (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
+     `AWS_REGION`)
+   - Docker Hub credentials (`DOCKER_HUB_USERNAME`, `DOCKER_HUB_TOKEN`)
+   - SSH key for deployment (`SSH_PRIVATE_KEY`)
+   - Application secrets (`DJANGO_SECRET_KEY`, `DB_USER`, `DB_PASS`, `DB_NAME`)
 
-   - `AWS_ACCESS_KEY_ID`: Your AWS access key for programmatic access
-   - `AWS_SECRET_ACCESS_KEY`: Your AWS secret key
-   - `AWS_REGION`: AWS region to deploy (e.g., `us-east-1`)
+2. **Environment Variable Handling**:
 
-2. **Docker Hub Credentials**:
+   - CI/CD pipeline environment variables defined in GitHub Actions workflow
+   - Docker Compose environment variables passed from CI/CD to containers
+   - Application configuration uses environment variables (not hardcoded values)
+   - Environment-specific variables set at deployment time
 
-   - `DOCKER_HUB_USERNAME`: Your Docker Hub username
-   - `DOCKER_HUB_TOKEN`: Access token for Docker Hub (not your password)
-
-3. **SSH Keys**:
-
-   - `SSH_PRIVATE_KEY`: Private SSH key for accessing the EC2 instance
-
-4. **Application Secrets**:
-   - `DJANGO_SECRET_KEY`: Secret key for Django application
-   - `DB_USER`: Database username
-   - `DB_PASS`: Database password
-   - `DB_NAME`: Database name
-
-These secrets are securely stored by GitHub and injected into the workflow
-environment during pipeline execution without being exposed in logs.
-
-### Terraform Configuration
-
-The infrastructure is defined as code using Terraform in the `main.tf` file:
-
-```hcl
-provider "aws" {
-  region = var.aws_region
-}
-
-# EC2 Instance
-resource "aws_instance" "app_server" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.instance_type
-  key_name               = aws_key_pair.deployer.key_name
-  vpc_security_group_ids = [aws_security_group.app_sg.id]
-
-  root_block_device {
-    volume_size = 20
-    volume_type = "gp2"
-  }
-
-  user_data = <<-EOF
-    #!/bin/bash
-    # Install Docker and other dependencies
-    apt-get update
-    apt-get install -y docker.io docker-compose
-    systemctl enable docker
-    systemctl start docker
-    usermod -aG docker ubuntu
-  EOF
-
-  tags = {
-    Name = "${var.app_name}-server"
-  }
-}
-
-# Security Group
-resource "aws_security_group" "app_sg" {
-  name        = "${var.app_name}-sg"
-  description = "Allow traffic for Pokédex application"
-
-  # SSH access
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # HTTP access
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Backend API port
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  # Outbound traffic
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-}
-
-# Elastic IP for stable access
-resource "aws_eip" "app_eip" {
-  instance = aws_instance.app_server.id
-  domain   = "vpc"
-}
-```
+3. **Secure Transmission**:
+   - Secrets are never exposed in logs or repositories
+   - SSH keys and passwords are stored as GitHub secrets
+   - Database credentials are injected at runtime
 
 ### Docker Configuration
 
-The application is containerized using Docker with separate containers for
-frontend, backend, and database:
+The containerization strategy uses specialized Dockerfiles for each component:
 
 #### Frontend Dockerfile
+
+The frontend uses a multi-stage build process:
+
+- Build stage uses Node.js to compile the React application
+- Production stage uses lightweight Nginx image to serve static assets
+- Build artifacts are copied from build stage to production stage
+- Custom Nginx configuration for handling SPA routing and API proxying
 
 ```dockerfile
 # Build stage
@@ -280,6 +224,13 @@ CMD ["nginx", "-g", "daemon off;"]
 
 #### Backend Dockerfile
 
+The backend uses a Python image with optimized dependencies:
+
+- Uses slim variant of Python 3.11 for smaller image size
+- Installs only necessary system dependencies
+- Custom entrypoint script for handling database migrations and startup
+- Proper health checks and container configuration
+
 ```dockerfile
 FROM python:3.11-slim
 WORKDIR /app
@@ -294,83 +245,90 @@ EXPOSE 3000
 
 #### Docker Compose Configuration
 
+The Docker Compose file orchestrates all services with proper dependencies:
+
+- Network configuration for service communication
+- Volume management for persistent data
+- Health checks for ensuring service readiness
+- Environment variable passing
+- Restart policies for reliability
+
+### GitHub Actions Workflow Configuration
+
+The GitHub Actions workflow (`cicd.yml`) implements the CI/CD pipeline:
+
 ```yaml
-version: '3.8'
+name: Pokedex CI/CD Pipeline
 
-services:
-  frontend:
-    image: ${DOCKER_HUB_USERNAME}/pokedex-frontend:latest
-    ports:
-      - '80:80'
-    depends_on:
-      - backend
-    environment:
-      - VITE_API_BASE_URL=http://${SERVER_IP:-localhost}:3000
-    restart: unless-stopped
-    networks:
-      - app-network
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
 
-  backend:
-    image: ${DOCKER_HUB_USERNAME}/pokedex-backend:latest
-    ports:
-      - '3000:3000'
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      - DEBUG=True
-      - SECRET_KEY=${DJANGO_SECRET_KEY:-default_dev_key}
-      - DB_HOST=db
-      - DB_PORT=5432
-      - DB_USER=${DB_USER:-admin}
-      - DB_PASS=${DB_PASS:-adminpassword}
-      - DB_NAME=${DB_NAME:-pokedex_db}
-      - SERVER_IP=${SERVER_IP:-localhost}
-    restart: unless-stopped
-    networks:
-      - app-network
+jobs:
+  test:
+    name: Test Application
+    runs-on: ubuntu-latest
+    steps:
+      # Frontend and backend testing steps...
 
-  db:
-    image: postgres:15-alpine
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    environment:
-      - POSTGRES_USER=${DB_USER:-admin}
-      - POSTGRES_PASSWORD=${DB_PASS:-adminpassword}
-      - POSTGRES_DB=${DB_NAME:-pokedex_db}
-    restart: unless-stopped
-    networks:
-      - app-network
-    healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U ${DB_USER}']
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
+  build:
+    name: Build Docker Images
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      # Docker build and push steps...
 
-networks:
-  app-network:
-    driver: bridge
+  deploy:
+    name: Provision Infrastructure and Deploy
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Terraform and deployment steps...
 
-volumes:
-  db-data:
-    driver: local
+  health-check:
+    name: Health Check
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      # Application health verification steps...
 ```
 
-To trigger the CI/CD pipeline:
+Key workflow features:
 
-1. Push to the main branch:
+- Efficient job dependencies and parallel execution
+- Conditional execution based on event types
+- Proper error handling and recovery
+- Caching of dependencies and build artifacts
+- Resource cleanup before deployments
 
-   ```bash
-   git push origin main
-   ```
+### Terraform Infrastructure Configuration
 
-2. The GitHub Actions workflow will:
-   - Run tests
-   - Build and push Docker images
-   - Provision AWS infrastructure
-   - Deploy the application
-   - Verify deployment with health checks
+Infrastructure is provisioned using Terraform with the following resources:
+
+- **EC2 Instance**: Ubuntu 22.04 LTS for running the application
+- **Security Group**: Configured with necessary ports open (22, 80, 443, 3000)
+- **Elastic IP**: For stable addressing of the application
+- **Key Pair**: For secure SSH access
+- **User Data Script**: Bootstrap script for initial server setup
+
+### Monitoring and Logging
+
+The application includes comprehensive monitoring and logging:
+
+- **Application Logs**: Django and Nginx logs for debugging
+- **Container Monitoring**: Docker health checks and status monitoring
+- **CI/CD Pipeline Monitoring**: GitHub Actions workflow logs
+- **Infrastructure Monitoring**: AWS CloudWatch integration
+
+### Testing Strategy
+
+The CI/CD pipeline includes automated testing:
+
+- **Frontend Tests**: React component and unit tests
+- **Backend Tests**: Django unit tests for API endpoints and models
+- **Integration Tests**: API endpoint testing with actual database
+- **Deployment Tests**: Health checks after deployment
 
 ## 📁 Project Structure
 
@@ -393,149 +351,104 @@ pokedex-app/
 │   ├── backend/           # Django project settings
 │   ├── manage.py          # Django management script
 │   ├── requirements.txt   # Python dependencies
+│   ├── entrypoint.sh      # Container entrypoint script
 │   └── Dockerfile         # Backend container configuration
 ├── docker-compose.yml     # Container orchestration
 ├── main.tf                # Terraform configuration for AWS
-├── entrypoint.sh          # Docker entrypoint script
 └── README.md              # This file
 ```
 
-## 🧪 Testing
+## 🧪 Running Tests Locally
 
-### Running Tests Locally
-
-Frontend tests:
+### Frontend Tests
 
 ```bash
 cd frontend
 npm test
 ```
 
-Backend tests:
+### Backend Tests
 
 ```bash
 cd backend
 python manage.py test
 ```
 
-## 🔧 CI/CD Pipeline In-Depth Documentation
+## 🔐 Security Considerations
 
-### Project Overview
+The application implements security best practices:
 
-This Pokédex application is a three-tier web application that allows users to
-browse Pokémon, create accounts, build teams, and play memory games. The
-application is containerized using Docker and deployed using a CI/CD pipeline
-with GitHub Actions and AWS.
+- JWT authentication for API access
+- CORS configuration for frontend-backend communication
+- Environment variable usage for sensitive information
+- AWS security groups for network isolation
+- HTTPS ready configuration
+- Database password protection
 
-### System Architecture
+## 🚨 Troubleshooting
 
-The application consists of three main components:
+Common issues and solutions:
 
-1. **Frontend**: React application served via Nginx
-2. **Backend**: Django REST API
-3. **Database**: PostgreSQL
+- **Docker Compose Issues**:
 
-### Technical Stack
+  ```bash
+  docker-compose down -v
+  docker-compose up -d
+  ```
 
-#### Frontend
+- **Database Connection Errors**:
 
-- React.js
-- Nginx (for serving static content and proxying API requests)
-- Containerized in Docker
+  ```bash
+  docker-compose logs db
+  ```
 
-#### Backend
+- **Frontend Not Loading**:
 
-- Django 5.1.6
-- Django REST Framework 3.15.2
-- JWT Authentication
-- Containerized in Docker
+  ```bash
+  docker-compose logs frontend
+  ```
 
-#### Database
+- **Backend API Errors**:
+  ```bash
+  docker-compose logs backend
+  ```
 
-- PostgreSQL
+## 📄 API Endpoints
 
-#### DevOps
-
-- Docker & Docker Compose for containerization
-- GitHub Actions for CI/CD
-- Terraform for infrastructure as code
-- AWS EC2 for hosting
-
-### Deployment Architecture
-
-The application is deployed on AWS with the following architecture:
-
-1. **AWS EC2 Instance**: t2.micro running Ubuntu 22.04
-2. **Docker Containers**:
-   - Frontend container (Nginx serving React)
-   - Backend container (Django)
-   - Database container (PostgreSQL)
-3. **Networking**:
-   - Frontend exposed on port 80
-   - Backend exposed on port 3000
-   - Database accessible only within the Docker network
-
-### CI/CD Pipeline
-
-The CI/CD pipeline is implemented using GitHub Actions and consists of the
-following stages:
-
-1. **Test**: Run tests for both frontend and backend
-2. **Build**: Build Docker images for frontend and backend
-3. **Deploy**: Provision AWS infrastructure with Terraform and deploy the
-   application
-4. **Health Check**: Verify the application is running correctly
-
-#### Pipeline Workflow
-
-```
-Test → Build → Deploy → Health Check
-```
-
-### Infrastructure Configuration
-
-#### Terraform Configuration
-
-The infrastructure is defined in the `main.tf` file, which provisions:
-
-1. An EC2 instance on AWS
-2. A security group with necessary ports open
-3. An Elastic IP for a static public IP address
-4. SSH key pair for secure access
-
-#### Docker Configuration
-
-The application uses three Docker containers orchestrated with Docker Compose:
-
-1. Frontend container:
-
-   - Built from `frontend/Dockerfile`
-   - Nginx configuration in `frontend/nginx.conf`
-
-2. Backend container:
-
-   - Built from `backend/Dockerfile`
-   - Django application with REST API
-
-3. Database container:
-   - Uses the official PostgreSQL image
-   - Data persisted using a Docker volume
-
-### API Endpoints
-
-#### Authentication
+### Authentication
 
 - `POST /api/users/register/`: Register a new user
 - `POST /api/users/login/`: Login and receive JWT tokens
 - `POST /api/users/logout/`: Logout and invalidate tokens
 
-#### User Data
+### User Data
 
 - `GET /api/users/team/`: Get the current user's Pokémon team
 - `POST /api/users/update_team/`: Add or remove Pokémon from team
 - `POST /api/users/update_high_score/`: Update game high scores
 - `GET /api/users/leaderboard/`: Get leaderboard data
 
-#### Pokémon Data
+### Pokémon Data
 
 - External API calls to PokeAPI for Pokémon information
+
+## 📚 Lessons Learned
+
+Throughout this project, several DevOps best practices were implemented:
+
+1. **Infrastructure as Code**: Using Terraform to manage AWS resources
+2. **Containerization**: Using Docker to package applications and dependencies
+3. **CI/CD Automation**: Using GitHub Actions for automated testing and
+   deployment
+4. **Secret Management**: Secure handling of credentials and sensitive
+   information
+5. **Monitoring and Logging**: Comprehensive logging for troubleshooting
+6. **Testing Integration**: Automated tests as part of the deployment pipeline
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## 📄 License
+
+This project is licensed under the MIT License.
