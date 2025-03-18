@@ -87,26 +87,30 @@ jobs:
         with:
           context: ./frontend
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-frontend:latest
+          tags:
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.FRONTEND_IMAGE_NAME
+            }}:latest
           cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/${{
+            env.FRONTEND_IMAGE_NAME }}:buildcache
           cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-frontend:buildcache,mode=max
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/${{
+            env.FRONTEND_IMAGE_NAME }}:buildcache,mode=max
 
       - name: Build and push backend image
         uses: docker/build-push-action@v4
         with:
           context: ./backend
           push: true
-          tags: ${{ secrets.DOCKER_HUB_USERNAME }}/pokedex-backend:latest
+          tags:
+            ${{ secrets.DOCKER_HUB_USERNAME }}/${{ env.BACKEND_IMAGE_NAME
+            }}:latest
           cache-from:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/${{
+            env.BACKEND_IMAGE_NAME }}:buildcache
           cache-to:
-            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME
-            }}/pokedex-backend:buildcache,mode=max
+            type=registry,ref=${{ secrets.DOCKER_HUB_USERNAME }}/${{
+            env.BACKEND_IMAGE_NAME }}:buildcache,mode=max
 
   # 3. Provision and Deploy
   deploy:
@@ -467,7 +471,7 @@ jobs:
 
           services:
             frontend:
-              image: ${DOCKER_USERNAME}/pokedex-frontend:latest
+              image: ${DOCKER_USERNAME}/${FRONTEND_IMAGE_NAME}:latest
               restart: always
               ports:
                 - "80:80"
@@ -475,7 +479,7 @@ jobs:
                 - backend
 
             backend:
-              image: ${DOCKER_USERNAME}/pokedex-backend:latest
+              image: ${DOCKER_USERNAME}/${BACKEND_IMAGE_NAME}:latest
               restart: always
               ports:
                 - "3000:3000"
@@ -515,11 +519,11 @@ jobs:
 
           # Pull images directly (bypass docker-compose pull)
           echo "Pulling images..."
-          sudo docker pull ${DOCKER_USERNAME}/pokedex-frontend:latest || {
+          sudo docker pull ${DOCKER_USERNAME}/${FRONTEND_IMAGE_NAME}:latest || {
             echo "Failed to pull frontend image. Checking Docker Hub login status..."
             sudo docker login --username "$DOCKER_USERNAME"
           }
-          sudo docker pull ${DOCKER_USERNAME}/pokedex-backend:latest
+          sudo docker pull ${DOCKER_USERNAME}/${BACKEND_IMAGE_NAME}:latest
           sudo docker pull postgres:14
 
           # Start containers
@@ -546,7 +550,16 @@ jobs:
           scp -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ./deploy-docker.sh ubuntu@$INSTANCE_IP:~/deploy-docker.sh
 
           # Execute script with environment variables
-          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "DOCKER_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' DOCKER_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' DB_USER='${{ secrets.DB_USER || 'admin' }}' DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' bash ~/deploy-docker.sh"
+          ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "\
+          FRONTEND_IMAGE_NAME='${{ env.FRONTEND_IMAGE_NAME }}' \
+          BACKEND_IMAGE_NAME='${{ env.BACKEND_IMAGE_NAME }}' \
+          DOCKER_USERNAME='${{ secrets.DOCKER_HUB_USERNAME }}' \
+          DOCKER_TOKEN='${{ secrets.DOCKER_HUB_TOKEN }}' \
+          DB_USER='${{ secrets.DB_USER || 'admin' }}' \
+          DB_PASS='${{ secrets.DB_PASS || 'your_db_password' }}' \
+          DB_NAME='${{ secrets.DB_NAME || 'pokedex_db' }}' \
+          DJANGO_SECRET_KEY='${{ secrets.DJANGO_SECRET_KEY || 'django-insecure-key' }}' \
+          bash ~/deploy-docker.sh"
 
           # Verify deployment
           ssh -i ~/.ssh/terraform-ec2 -o StrictHostKeyChecking=no ubuntu@$INSTANCE_IP "echo 'Final status:' && sudo docker ps && echo 'Service ports:' && sudo ss -tulpn | grep -E ':(80|3000)'"
